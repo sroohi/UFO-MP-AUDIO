@@ -148,10 +148,80 @@ if run_bounded registered-target 90 /usr/bin/auval -v aumu Ufo1 MpAu && awk '/AU
   validated=true
 else
   snapshot before-refresh
+  python3 - "$logs" "${targets[2]}" "${parents[2]}" <<'PY'
+from pathlib import Path
+import subprocess,sys
+logs,component,parent=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3])
+commands=[
+    ('installed-paths.txt',['/bin/ls','-ld',str(parent.parent),str(parent),str(component),str(component/'Contents'),str(component/'Contents/Info.plist'),str(component/'Contents/MacOS/UFO')],8),
+    ('installed-stat.txt',['/usr/bin/stat','-f','%N uid=%u gid=%g mode=%Sp inode=%d:%i modified=%m',str(parent),str(component),str(component/'Contents/Info.plist'),str(component/'Contents/MacOS/UFO')],8),
+    ('installed-xattrs.txt',['/usr/bin/xattr','-lr',str(component)],8),
+    ('registrar-unified-before-refresh.log',['/usr/bin/log','show','--style','compact','--last','5m','--info','--debug','--predicate','process == "AudioComponentRegistrar" OR process == "auvaltool"'],15),
+]
+for filename,command,budget in commands:
+    with (logs/filename).open('w') as output:
+        try:
+            result=subprocess.run(command,stdout=output,stderr=subprocess.STDOUT,timeout=budget)
+            output.write('\nDiagnostic command exit: '+str(result.returncode)+'\n')
+        except subprocess.TimeoutExpired:output.write('\nDiagnostic command exceeded '+str(budget)+' seconds.\n')
+        except OSError as error:output.write('\nDiagnostic command error: '+str(error)+'\n')
+PY
   refresh_status=0
-  killall -TERM -u "$(id -un)" AudioComponentRegistrar > "$logs/registrar-refresh.log" 2>&1 || refresh_status=$?
-  printf 'Current-user AudioComponentRegistrar SIGTERM exit: %s\n' "$refresh_status" >> "$logs/registrar-refresh.log"
+  python3 - "$logs/registrar-refresh.json" > "$logs/registrar-refresh.log" 2>&1 <<'PY' || refresh_status=$?
+from pathlib import Path
+import json,os,signal,subprocess,sys,time
+expected='/System/Library/Frameworks/AudioToolbox.framework/AudioComponentRegistrar'
+uid=os.getuid()
+def identity(pid):
+    fields=[]
+    for field in ('uid','lstart','comm'):
+        result=subprocess.run(['ps','-p',str(pid),'-o',field+'='],capture_output=True,text=True)
+        if result.returncode:return None
+        fields.append(result.stdout.strip())
+    return {'pid':pid,'uid':fields[0],'started':fields[1],'executable':fields[2]}
+def owned(record):
+    return record is not None and record['uid']==str(uid) and record['executable']==expected
+listing=subprocess.run(['ps','-U',str(uid),'-o','pid=,comm='],capture_output=True,text=True,check=True)
+records=[]
+for line in listing.stdout.splitlines():
+    fields=line.split(None,1)
+    if len(fields)!=2 or not fields[0].isdigit() or fields[1]!=expected:continue
+    before=identity(int(fields[0]))
+    if owned(before):records.append({'before':before})
+failed=False
+for record in records:
+    before=record['before'];pid=before['pid']
+    if identity(pid)!=before:
+        record['term']='Skipped: identity changed before signal';failed=True;continue
+    try:os.kill(pid,signal.SIGTERM);record['term']='Sent to captured owned PID'
+    except ProcessLookupError:record['term']='Already exited'
+    except OSError as error:record['term']=str(error);failed=True
+deadline=time.monotonic()+1.0
+while time.monotonic()<deadline and any(identity(record['before']['pid'])==record['before'] for record in records):time.sleep(.1)
+for record in records:
+    before=record['before'];pid=before['pid'];after=identity(pid);record['afterTerm']=after
+    if after is None:record['kill']='Not needed: captured PID exited';continue
+    if after!=before or not owned(after):
+        record['kill']='Skipped: identity changed';continue
+    # Only this same-user Apple metadata service with unchanged start time is
+    # eligible. No process-name-wide KILL, audio daemon or cache deletion.
+    if identity(pid)!=before:
+        record['kill']='Skipped: identity changed before signal';continue
+    try:os.kill(pid,signal.SIGKILL);record['kill']='Sent to surviving captured owned PID'
+    except ProcessLookupError:record['kill']='Already exited'
+    except OSError as error:record['kill']=str(error);failed=True
+deadline=time.monotonic()+2.0
+while time.monotonic()<deadline and any(identity(record['before']['pid'])==record['before'] for record in records):time.sleep(.1)
+for record in records:
+    record['afterKill']=identity(record['before']['pid'])
+    if record['afterKill']==record['before']:failed=True
+Path(sys.argv[1]).write_text(json.dumps({'expectedExecutable':expected,'uid':uid,'records':records,'failed':failed},indent=2)+'\n')
+print('Captured owned registrars:',len(records),'refresh failed:',failed,flush=True)
+sys.exit(1 if failed else 0)
+PY
+  printf 'Owned registrar refresh exit: %s\n' "$refresh_status" >> "$logs/registrar-refresh.log"
   run_bounded refreshed-list 90 /usr/bin/auval -a || true
+  snapshot after-refresh-query
   if run_bounded refreshed-target 90 /usr/bin/auval -v aumu Ufo1 MpAu && awk '/AU VALIDATION SUCCEEDED/ {found=1} END {exit !found}' "$logs/refreshed-target.log"; then validated=true; fi
 fi
 snapshot after-validation
