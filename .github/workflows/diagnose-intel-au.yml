@@ -1,0 +1,41 @@
+name: Diagnose Intel Audio Unit
+on:
+  workflow_dispatch:
+    inputs:
+      package_run:
+        description: Successful universal ARM package workflow run
+        required: true
+        default: '39827001446'
+        type: string
+  push:
+    paths:
+      - .github/workflows/diagnose-intel-au.yml
+      - scripts/diagnose-intel-au.sh
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the unchanged universal package
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.package_run || '39827001446' }}
+          name: UFO-macOS-universal-development-arm64
+          path: dist/diagnostic-package
+      - name: Inspect cold registry, targeted Apple validation and packaged installation
+        env:
+          UFO_DIAGNOSTIC_PACKAGE_RUN: ${{ inputs.package_run || '39827001446' }}
+        run: scripts/diagnose-intel-au.sh
+      - name: Preserve native registry and validator evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UFO-Intel-AU-diagnostic
+          path: dist/diagnostics/intel-au/
+          if-no-files-found: error
