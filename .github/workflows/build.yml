@@ -1,0 +1,49 @@
+name: Build UFO
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DUFO_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+      - name: Check local installer transactions with mocked native tools
+        run: python3 Tests/MacInstallerTests.py
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record native Mac capabilities
+        run: scripts/probe-macos-runner.sh
+      - name: Build and validate universal app and actual VST3 wrapper
+        run: scripts/build-macos.sh
+      - name: Preserve native test logs and editor captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UFO-macOS-native-validation-${{ matrix.arch }}
+          path: |
+            dist/validation/
+            build-macos/Testing/Temporary/LastTest.log
+            build-macos/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UFO-macOS-universal-development-${{ matrix.arch }}
+          path: dist/UFO-macOS-universal-unsigned.zip
+          if-no-files-found: error
