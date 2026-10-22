@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(UFO VERSION 0.3.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-option(UFO_BUILD_PLUGIN "Build JUCE standalone and VST3" ON)
+option(UFO_BUILD_PLUGIN "Build JUCE standalone, VST3 and macOS Audio Unit" ON)
 include(CTest)
 find_package(Threads REQUIRED)
 add_executable(ufo_engine_tests Tests/EngineTests.cpp)
@@ -21,10 +21,14 @@ if(UFO_BUILD_PLUGIN)
   include(FetchContent)
   FetchContent_Declare(JUCE GIT_REPOSITORY https://github.com/juce-framework/JUCE.git GIT_TAG 51a8a6d7aeae7326956d747737ccf1575e61e209)
   FetchContent_MakeAvailable(JUCE)
+  set(UFO_PLUGIN_FORMATS Standalone VST3)
+  if(APPLE)
+    list(APPEND UFO_PLUGIN_FORMATS AU)
+  endif()
   juce_add_plugin(UFO
     COMPANY_NAME "MP Audio" BUNDLE_ID "audio.mpaudio.ufo"
     PLUGIN_MANUFACTURER_CODE MpAu PLUGIN_CODE Ufo1
-    FORMATS Standalone VST3 PRODUCT_NAME "UFO"
+    FORMATS ${UFO_PLUGIN_FORMATS} PRODUCT_NAME "UFO"
     IS_SYNTH TRUE NEEDS_MIDI_INPUT TRUE NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE COPY_PLUGIN_AFTER_BUILD FALSE
     MICROPHONE_PERMISSION_ENABLED FALSE)
@@ -42,7 +46,7 @@ if(UFO_BUILD_PLUGIN)
   set_tests_properties(plugin_integration PROPERTIES ENVIRONMENT "UFO_USER_DATA_DIR=${CMAKE_CURRENT_BINARY_DIR}/test-data")
   add_executable(ufo_vst3_host_tests Tests/MacHostValidation.cpp)
   target_link_libraries(ufo_vst3_host_tests PRIVATE juce::juce_audio_utils)
-  target_compile_definitions(ufo_vst3_host_tests PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_PLUGINHOST_AU=0 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+  target_compile_definitions(ufo_vst3_host_tests PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_PLUGINHOST_AU=$<BOOL:${APPLE}> JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
   add_executable(ufo_gpu_tests Tests/GpuVisualizationTests.cpp Source/GpuWaveform.cpp)
   target_include_directories(ufo_gpu_tests PRIVATE Source)
   target_link_libraries(ufo_gpu_tests PRIVATE juce::juce_opengl)

@@ -9,7 +9,7 @@ log_dir="$PWD/dist/validation"
 mkdir -p "$log_dir"
 package_dir=$(cd "$package_dir" && pwd)
 build_dir=$(cd "$build_dir" && pwd)
-for spec in 'UFO.app:APPL' 'UFO.vst3:BNDL'; do
+for spec in 'UFO.app:APPL' 'UFO.vst3:BNDL' 'UFO.component:BNDL'; do
   bundle_name=${spec%%:*}
   package_type=${spec##*:}
   bundle="$package_dir/$bundle_name"
@@ -18,7 +18,7 @@ for spec in 'UFO.app:APPL' 'UFO.vst3:BNDL'; do
   [[ -f "$plist" && -x "$binary" ]] || { echo "Incomplete bundle: $bundle" >&2; exit 1; }
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")" == UFO ]] || { echo "Unexpected executable in $bundle" >&2; exit 1; }
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$plist")" == "$package_type" ]] || { echo "Unexpected bundle type in $bundle" >&2; exit 1; }
-  lipo -verify_arch arm64 x86_64 "$binary"
+  lipo "$binary" -verify_arch arm64 x86_64
   codesign --verify --deep --strict --verbose=2 "$bundle"
   while IFS= read -r dependency; do
     case "$dependency" in
@@ -26,6 +26,11 @@ for spec in 'UFO.app:APPL' 'UFO.vst3:BNDL'; do
       *) echo "Non-portable library reference in $binary: $dependency" >&2; exit 1 ;;
     esac
   done < <(otool -L "$binary" | awk '/^[[:space:]]/ {print $1}')
+done
+au_plist="$package_dir/UFO.component/Contents/Info.plist"
+for spec in 'type:aumu' 'subtype:Ufo1' 'manufacturer:MpAu'; do
+  key=${spec%%:*}; expected=${spec##*:}
+  [[ "$(/usr/libexec/PlistBuddy -c "Print :AudioComponents:0:$key" "$au_plist")" == "$expected" ]] || { echo "Unexpected Audio Unit $key" >&2; exit 1; }
 done
 {
   printf 'macOS: '; sw_vers -productVersion
@@ -36,6 +41,7 @@ done
 } > "$log_dir/machine.txt"
 [[ -x "$build_dir/ufo_vst3_host_tests" ]] || { echo 'Build ufo_vst3_host_tests before validation.' >&2; exit 1; }
 "$build_dir/ufo_vst3_host_tests" "$package_dir/UFO.vst3" "$log_dir" --probe-device 2>&1 | tee "$log_dir/vst3-host.log"
+scripts/validate-au-macos.sh "$package_dir/UFO.component" "$build_dir/ufo_vst3_host_tests" "$log_dir/au"
 
 # The host test above exercises audio/editor behavior. This separate check verifies
 # the standalone process launches and remains alive; it is not a listening test.
@@ -63,5 +69,5 @@ done
 printf 'PASS: standalone remained alive for five seconds; audio was validated through the VST3 host test.\n' | tee "$log_dir/standalone-result.txt"
 cleanup
 app_pid=''
-printf 'PASS: macOS universal bundle structure, signatures, portable linkage, native VST3 hosting and standalone launch.\n'
-printf 'Unrun here: third-party DAW compatibility, human listening/third-party DAW assessment and execution on the other CPU architecture. Run scripts/listen-macos.sh for a physical output audition.\n'
+printf 'PASS: macOS universal bundle structure, signatures, portable linkage, native VST3/AU hosting, Apple auval and standalone launch.\n'
+printf 'Unrun here: Logic Pro project/UI sessions, human listening and execution on the other CPU architecture. Run scripts/listen-macos.sh for a physical output audition.\n'

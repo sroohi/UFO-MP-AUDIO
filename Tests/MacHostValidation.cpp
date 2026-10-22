@@ -11,7 +11,7 @@ namespace {
 void require(bool passed, const char* message) {
     if (!passed) throw std::runtime_error(message);
 }
-void checkRateAndBlockSizes(juce::AudioPluginInstance& plugin) {
+void checkRateAndBlockSizes(juce::AudioPluginInstance& plugin, const juce::String& wrapperName) {
     for (double sampleRate : {44100.0, 48000.0, 96000.0}) {
         for (int blockSize : {64, 127, 256, 1024}) {
             plugin.releaseResources();
@@ -39,12 +39,12 @@ void checkRateAndBlockSizes(juce::AudioPluginInstance& plugin) {
             events.addEvent(juce::MidiMessage::allSoundOff(1), 0);
             plugin.processBlock(block, events);
             require(block.getMagnitude(0, blockSize) < 0.0001f, "Rate/block matrix panic did not silence audio");
-            std::cout << "PASS: actual VST3 at " << sampleRate << " Hz / " << blockSize << " samples\n";
+            std::cout << "PASS: actual " << wrapperName << " at " << sampleRate << " Hz / " << blockSize << " samples\n";
         }
     }
 }
 
-juce::AudioBuffer<float> renderAudition(juce::AudioPluginInstance& plugin, const juce::File& artifacts) {
+juce::AudioBuffer<float> renderAudition(juce::AudioPluginInstance& plugin, const juce::File& artifacts, const juce::String& wrapperSlug) {
     constexpr double sampleRate = 48000;
     constexpr int blockSize = 256, totalFrames = 48000 * 8;
     plugin.releaseResources();
@@ -69,7 +69,7 @@ juce::AudioBuffer<float> renderAudition(juce::AudioPluginInstance& plugin, const
         for (int channel = 0; channel < 2; ++channel)
             rendered.copyFrom(channel, frame, block, channel, 0, count);
     }
-    const auto file = artifacts.getChildFile("UFO-vst3-audition.wav");
+    const auto file = artifacts.getChildFile("UFO-" + wrapperSlug + "-audition.wav");
     juce::TemporaryFile temporary(file);
     {
         auto stream = temporary.getFile().createOutputStream();
@@ -147,15 +147,17 @@ void probeDeviceAndMaybeListen(const juce::AudioBuffer<float>& audio, const juce
 }
 
 // This loads the built wrapper, rather than linking directly to UFO shared code.
-// It is portable despite its filename and can also exercise the Linux VST3 bundle.
+// On macOS --au resolves the temporarily registered AUv2 component. The default
+// VST3 mode is portable and also exercises the actual Linux wrapper.
 int main(int argc, char** argv) {
     try {
-        require(argc >= 2, "Usage: ufo_vst3_host_tests <UFO.vst3> [artifact-directory] [--probe-device] [--require-device] [--listen]");
-        bool probeDevice=false, requireDevice=false, listen=false;
+        require(argc >= 2, "Usage: ufo_vst3_host_tests <UFO.vst3|UFO.component> [artifact-directory] [--au] [--probe-device] [--require-device] [--listen]");
+        bool probeDevice=false, requireDevice=false, listen=false, audioUnit=false;
         juce::String artifactPath;
         for(int i=2;i<argc;++i) {
             const auto option=juce::String::fromUTF8(argv[i]);
-            if(option=="--probe-device")probeDevice=true;
+            if(option=="--au")audioUnit=true;
+            else if(option=="--probe-device")probeDevice=true;
             else if(option=="--require-device"){probeDevice=true;requireDevice=true;}
             else if(option=="--listen"){probeDevice=true;requireDevice=true;listen=true;}
             else if(!option.startsWith("--") && artifactPath.isEmpty())artifactPath=option;
@@ -163,44 +165,58 @@ int main(int argc, char** argv) {
         }
         juce::ScopedJuceInitialiser_GUI initialise;
         const juce::File bundle(juce::String::fromUTF8(argv[1]));
-        require(bundle.isDirectory(), "VST3 bundle does not exist");
+        require(bundle.isDirectory(), "Plugin bundle does not exist");
+        require(bundle.hasFileExtension(audioUnit ? ".component" : ".vst3"), "Bundle extension does not match the selected wrapper format");
+        const juce::String wrapperName=audioUnit ? "AU" : "VST3",wrapperSlug=audioUnit ? "au" : "vst3";
         const juce::File artifacts = artifactPath.isNotEmpty()
             ? juce::File::getCurrentWorkingDirectory().getChildFile(artifactPath)
             : juce::File::getCurrentWorkingDirectory();
         require(artifacts.createDirectory().wasOk(), "Cannot create host validation artifact directory");
 
-        juce::VST3PluginFormat format;
+        std::unique_ptr<juce::AudioPluginFormat> format;
+        if(audioUnit) {
+           #if JUCE_MAC && JUCE_PLUGINHOST_AU
+            format=std::make_unique<juce::AudioUnitPluginFormat>();
+           #else
+            throw std::runtime_error("Audio Unit hosting requires the macOS host-test build");
+           #endif
+        } else format=std::make_unique<juce::VST3PluginFormat>();
+        std::cout << "Validating actual " << wrapperName << " wrapper: " << bundle.getFullPathName() << '\n';
         juce::OwnedArray<juce::PluginDescription> descriptions;
-        format.findAllTypesForFile(descriptions, bundle.getFullPathName());
-        require(descriptions.size() > 0, "VST3 scanner found no plugin classes");
+        format->findAllTypesForFile(descriptions, bundle.getFullPathName());
+        require(descriptions.size() > 0, "Wrapper scanner found no plugin classes");
         const juce::PluginDescription* description = nullptr;
         for (auto* candidate : descriptions)
             if (candidate->name == "UFO" && candidate->isInstrument) { description = candidate; break; }
         require(description != nullptr, "Scanner did not find the UFO instrument class");
+        if(audioUnit) {
+            require(description->fileOrIdentifier=="AudioUnit:Synths/aumu,Ufo1,MpAu", "Scanner resolved an unexpected AU type/subtype/manufacturer");
+            std::cout << "Registered AU identity: " << description->fileOrIdentifier << '\n';
+        }
         juce::String error;
-        auto plugin = format.createInstanceFromDescription(*description, 48000.0, 256, error);
-        if (plugin == nullptr) throw std::runtime_error("Cannot instantiate UFO VST3: " + error.toStdString());
+        auto plugin = format->createInstanceFromDescription(*description, 48000.0, 256, error);
+        if (plugin == nullptr) throw std::runtime_error("Cannot instantiate UFO " + wrapperName.toStdString() + ": " + error.toStdString());
         plugin->setPlayConfigDetails(0, 2, 48000.0, 256);
         plugin->prepareToPlay(48000.0, 256);
-        require(plugin->getTotalNumOutputChannels() == 2, "VST3 host did not negotiate stereo output");
+        require(plugin->getTotalNumOutputChannels() == 2, "Wrapper host did not negotiate stereo output");
 
         juce::AudioBuffer<float> buffer(2, 256);
         juce::MidiBuffer midi;
         midi.addEvent(juce::MidiMessage::noteOn(1, 69, 0.8f), 128);
         plugin->processBlock(buffer, midi);
-        require(buffer.getMagnitude(0, 0, 128) == 0.0f, "VST3 MIDI sample offset was not preserved");
-        require(buffer.getMagnitude(0, 128, 128) > 0.0f, "VST3 wrapper produced no note audio");
+        require(buffer.getMagnitude(0, 0, 128) == 0.0f, "Wrapper MIDI sample offset was not preserved");
+        require(buffer.getMagnitude(0, 128, 128) > 0.0f, "Plugin wrapper produced no note audio");
         juce::AudioProcessorParameter* outputParameter = nullptr;
         for (auto* parameter : plugin->getParameters())
             if (parameter->getName(128) == "Output") { outputParameter = parameter; break; }
-        require(outputParameter != nullptr, "VST3 host did not expose the Output parameter");
+        require(outputParameter != nullptr, "Wrapper host did not expose the Output parameter");
         outputParameter->setValueNotifyingHost(0.31f);
         midi.clear();
         buffer.clear();
-        plugin->processBlock(buffer, midi); // Apply queued VST3 host parameter changes.
+        plugin->processBlock(buffer, midi); // Apply queued host parameter changes.
         juce::MemoryBlock state;
         plugin->getStateInformation(state);
-        require(state.getSize() > 0, "VST3 host state serialization returned no data");
+        require(state.getSize() > 0, "Wrapper host state serialization returned no data");
         outputParameter->setValueNotifyingHost(0.81f);
         midi.clear();
         buffer.clear();
@@ -210,7 +226,7 @@ int main(int argc, char** argv) {
         buffer.clear();
         plugin->processBlock(buffer, midi);
         require(std::abs(outputParameter->getValue() - 0.31f) < 0.001f,
-                "VST3 host parameter state did not round-trip");
+                "Wrapper host parameter state did not round-trip");
         midi.clear();
         midi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
         for (int note = 48; note < 62; ++note)
@@ -227,24 +243,24 @@ int main(int argc, char** argv) {
                 for (int sample = 0; sample < buffer.getNumSamples(); ++sample) {
                     const float value = buffer.getSample(channel, sample);
                     require(std::isfinite(value) && std::abs(value) <= 1.001f,
-                            "VST3 audio was not finite and bounded");
+                            "Plugin audio was not finite and bounded");
                     energy += static_cast<double>(value) * value;
                 }
             midi.clear();
         }
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        require(energy > 0.0, "VST3 wrapper became silent during sustained rendering");
+        require(energy > 0.0, "Plugin wrapper became silent during sustained rendering");
         const double audioSeconds = static_cast<double>(blocks * 256) / 48000.0;
-        std::cout << "VST3 14-voice render: " << audioSeconds << " audio seconds in " << elapsed
+        std::cout << wrapperName << " 14-voice render: " << audioSeconds << " audio seconds in " << elapsed
                   << " wall seconds (" << elapsed / audioSeconds * 100.0
                   << "% of one core; diagnostic, not a realtime deadline guarantee)\n";
 
         {
             std::unique_ptr<juce::AudioProcessorEditor> editor(plugin->createEditor());
             require(editor != nullptr && editor->getWidth() > 0 && editor->getHeight() > 0,
-                    "VST3 host could not create the native editor");
-            // The JUCE VST3 host wrapper paints black itself; the instrument UI
-            // lives in an embedded native child. Attach a real peer and capture
+                    "Wrapper host could not create the native editor");
+            // The wrapper embeds the instrument UI in a native child. Attach
+            // a real peer and capture
             // that native window after dispatching paints and plugin run-loop work.
             editor->setVisible(false);
             editor->setTopLeftPosition(20, 20);
@@ -268,7 +284,7 @@ int main(int argc, char** argv) {
             editor->setVisible(false);
             require(captureError.isEmpty(), captureError.toRawUTF8());
             require(image.isValid() && image.getWidth() > 0 && image.getHeight() > 0,
-                    "Native VST3 window capture failed");
+                    "Native plugin window capture failed");
             int samples = 0, brightPixels = 0, coloredPixels = 0;
             for (int y = 0; y < image.getHeight(); y += 4)
                 for (int x = 0; x < image.getWidth(); x += 4) {
@@ -280,30 +296,30 @@ int main(int argc, char** argv) {
                     if (brightest > 80 && brightest - darkest > 30) ++coloredPixels;
                 }
             require(brightPixels > samples / 1000 && coloredPixels > samples / 5000,
-                    "Native VST3 editor capture is blank or has no rendered instrument controls");
+                    "Native plugin editor capture is blank or has no rendered instrument controls");
             std::cout << "Native editor capture: " << image.getWidth() << "x" << image.getHeight()
                       << ", sampled bright pixels=" << brightPixels << ", colored pixels=" << coloredPixels << '\n';
-            const auto screenshot = artifacts.getChildFile("UFO-vst3-host-editor.png");
+            const auto screenshot = artifacts.getChildFile("UFO-" + wrapperSlug + "-host-editor.png");
             juce::FileOutputStream stream(screenshot);
-            require(stream.openedOk(), "Cannot open VST3 editor screenshot");
+            require(stream.openedOk(), "Cannot open plugin editor screenshot");
             stream.setPosition(0);
-            require(stream.truncate().wasOk(), "Cannot truncate VST3 editor screenshot");
+            require(stream.truncate().wasOk(), "Cannot truncate plugin editor screenshot");
             juce::PNGImageFormat png;
-            require(png.writeImageToStream(image, stream), "Cannot write VST3 editor screenshot");
+            require(png.writeImageToStream(image, stream), "Cannot write plugin editor screenshot");
             stream.flush();
         }
         midi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
         buffer.clear();
         plugin->processBlock(buffer, midi);
-        require(buffer.getMagnitude(0, 256) < 0.0001f, "VST3 all-sound-off did not clear audio");
-        checkRateAndBlockSizes(*plugin);
-        const auto audition=renderAudition(*plugin,artifacts);
+        require(buffer.getMagnitude(0, 256) < 0.0001f, "Plugin all-sound-off did not clear audio");
+        checkRateAndBlockSizes(*plugin,wrapperName);
+        const auto audition=renderAudition(*plugin,artifacts,wrapperSlug);
         if(probeDevice)probeDeviceAndMaybeListen(audition,artifacts,requireDevice,listen);
         const auto notes=artifacts.getChildFile("LISTENING-NOTES.md");
         if(!notes.existsAsFile())require(notes.replaceWithText("# UFO listening and DAW observations\n\nStatus: PENDING human assessment. Automated offline renders do not establish audibility or DAW compatibility.\n\n- Mac model / macOS / CPU architecture:\n- Output device / sample rate / buffer size:\n- Audition heard in both channels, no unwanted clicks/dropouts:\n- DAW name/version; instrument scan/load:\n- MIDI keyboard, sustain/pitch bend and patch recall:\n- GPU visualization and long-source seeks during playback:\n- Project save/reopen and offline bounce:\n- Result / issues / log paths:\n"),"Cannot create manual observation template");
         plugin->releaseResources();
         plugin.reset();
-        std::cout << "PASS: actual VST3 scan/load, stereo negotiation, MIDI timing, audio, state, native editor and all-sound-off\n";
+        std::cout << "PASS: actual " << wrapperName << " scan/load, stereo negotiation, MIDI timing, audio, state, native editor and all-sound-off\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

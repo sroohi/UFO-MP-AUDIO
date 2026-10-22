@@ -15,6 +15,8 @@ jobs:
       - run: ctest --test-dir build --output-on-failure
       - name: Check local installer transactions with mocked native tools
         run: python3 Tests/MacInstallerTests.py
+      - name: Check temporary AU registration preservation and cleanup
+        run: python3 Tests/MacAURegistrationTests.py
   macos:
     strategy:
       fail-fast: false
@@ -32,7 +34,7 @@ jobs:
         run: |
           scripts/probe-macos-runner.sh
           test "$(uname -m)" = "${{ matrix.arch }}"
-      - name: Build and validate universal app and actual VST3 wrapper
+      - name: Build and validate universal app, VST3 and Logic Audio Unit
         run: scripts/build-macos.sh
       - name: Preserve native test logs and editor captures
         if: always()

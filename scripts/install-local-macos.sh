@@ -5,7 +5,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 replace=false
 case "${1:-}" in '' ) ;; --replace) replace=true ;; *) printf 'Usage: %s [--replace]\n' "$(basename "$0")" >&2; exit 1 ;; esac
 packaged=false
-if [[ -d "$script_dir/UFO.app" && -d "$script_dir/UFO.vst3" ]]; then
+if [[ -d "$script_dir/UFO.app" || -d "$script_dir/UFO.vst3" || -d "$script_dir/UFO.component" ]]; then
   package_dir="$script_dir"
   packaged=true
 else
@@ -15,52 +15,55 @@ if pgrep -x -u "$(id -u)" UFO >/dev/null; then
   echo 'Quit the standalone UFO app before installing so unsaved patches stay under your control.' >&2
   exit 1
 fi
-app_source="$package_dir/UFO.app"
-plugin_source="$package_dir/UFO.vst3"
+if pgrep -x -u "$(id -u)" 'Logic Pro' >/dev/null || pgrep -x -u "$(id -u)" 'Logic Pro X' >/dev/null; then
+  echo 'Quit Logic Pro before installing UFO so your current session stays under your control.' >&2
+  exit 1
+fi
+bundle_names=("UFO.app" "UFO.vst3" "UFO.component")
+bundle_labels=("app" "VST3" "Audio Unit")
 native_arch=$(uname -m)
-for source in "$app_source" "$plugin_source"; do
+for name in "${bundle_names[@]}"; do
+  source="$package_dir/$name"
   [[ -d "$source" && -x "$source/Contents/MacOS/UFO" ]] || { echo "Missing $source; run scripts/build-macos.sh first." >&2; exit 1; }
-  lipo -verify_arch "$native_arch" "$source/Contents/MacOS/UFO"
+  lipo "$source/Contents/MacOS/UFO" -verify_arch "$native_arch"
   codesign --verify --deep --strict "$source"
 done
 install_root=${UFO_INSTALL_ROOT:-$HOME}
 [[ "$install_root" == /* ]] || { echo 'UFO_INSTALL_ROOT must be an absolute path.' >&2; exit 1; }
-app_parent="$install_root/Applications"
-plugin_parent="$install_root/Library/Audio/Plug-Ins/VST3"
-app_target="$app_parent/UFO.app"
-plugin_target="$plugin_parent/UFO.vst3"
-mkdir -p "$app_parent" "$plugin_parent"
-for target in "$app_target" "$plugin_target"; do
+parents=("$install_root/Applications" "$install_root/Library/Audio/Plug-Ins/VST3" "$install_root/Library/Audio/Plug-Ins/Components")
+targets=("${parents[0]}/UFO.app" "${parents[1]}/UFO.vst3" "${parents[2]}/UFO.component")
+mkdir -p "${parents[@]}"
+for target in "${targets[@]}"; do
   if [[ -e "$target" || -L "$target" ]]; then
     [[ "$replace" == true ]] || { echo "Already exists: $target. Use --replace to retain a backup and install this build." >&2; exit 1; }
     [[ -d "$target" && ! -L "$target" ]] || { echo "Refusing to replace a non-bundle or symlink: $target" >&2; exit 1; }
   fi
 done
-app_stage=$(mktemp -d "$app_parent/.ufo-install.XXXXXX")
-plugin_stage=''
-app_backup=''
-plugin_backup=''
-installed_app=false
-installed_plugin=false
+stages=("" "" "")
+backups=("" "" "")
+installed=(false false false)
 success=false
 cleanup() {
+  local index
   if [[ "$success" != true ]]; then
-    [[ "$installed_plugin" != true ]] || rm -rf "$plugin_target"
-    [[ "$installed_app" != true ]] || rm -rf "$app_target"
-    if [[ -n "$plugin_backup" && -d "$plugin_backup/UFO.vst3" ]]; then mv "$plugin_backup/UFO.vst3" "$plugin_parent/"; fi
-    if [[ -n "$app_backup" && -d "$app_backup/UFO.app" ]]; then mv "$app_backup/UFO.app" "$app_parent/"; fi
+    for ((index=${#bundle_names[@]}-1; index>=0; --index)); do
+      [[ "${installed[index]}" != true ]] || rm -rf "${targets[index]}"
+      if [[ -n "${backups[index]}" && -d "${backups[index]}/${bundle_names[index]}" ]]; then
+        mv "${backups[index]}/${bundle_names[index]}" "${parents[index]}/"
+      fi
+    done
   fi
-  rm -rf "$app_stage"
-  [[ -z "$plugin_stage" ]] || rm -rf "$plugin_stage"
+  for index in "${!bundle_names[@]}"; do
+    [[ -z "${stages[index]}" ]] || rm -rf "${stages[index]}"
+  done
 }
 trap cleanup EXIT
-plugin_stage=$(mktemp -d "$plugin_parent/.ufo-install.XXXXXX")
-ditto "$app_source" "$app_stage/UFO.app"
-ditto "$plugin_source" "$plugin_stage/UFO.vst3"
-for staged in "$app_stage/UFO.app" "$plugin_stage/UFO.vst3"; do
+for index in "${!bundle_names[@]}"; do
+  stages[index]=$(mktemp -d "${parents[index]}/.ufo-install.XXXXXX")
+  staged="${stages[index]}/${bundle_names[index]}"
+  ditto "$package_dir/${bundle_names[index]}" "$staged"
   codesign --verify --deep --strict "$staged"
-  # The user requested this local development install. Clear browser quarantine
-  # only on our own verified copies, including nested files; skip symlinks.
+  # Clear browser quarantine only from these verified copies; skip symlinks.
   while IFS= read -r -d '' item; do
     if xattr -p com.apple.quarantine "$item" >/dev/null 2>&1; then
       xattr -d com.apple.quarantine "$item"
@@ -68,31 +71,30 @@ for staged in "$app_stage/UFO.app" "$plugin_stage/UFO.vst3"; do
   done < <(find "$staged" \( -type d -o -type f \) -print0)
   codesign --verify --deep --strict "$staged"
 done
-# Stage in each destination filesystem so final bundle renames are atomic.
-# Existing bundles move into recoverable backups before either new bundle lands.
-if [[ -d "$app_target" ]]; then
-  app_backup=$(mktemp -d "$app_parent/UFO-backup.XXXXXX")
-  mv "$app_target" "$app_backup/"
-fi
-if [[ -d "$plugin_target" ]]; then
-  plugin_backup=$(mktemp -d "$plugin_parent/UFO-backup.XXXXXX")
-  mv "$plugin_target" "$plugin_backup/"
-fi
-mv -n "$app_stage/UFO.app" "$app_parent/"
-[[ ! -e "$app_stage/UFO.app" ]] || { echo 'Application destination changed during install.' >&2; exit 1; }
-installed_app=true
-mv -n "$plugin_stage/UFO.vst3" "$plugin_parent/"
-[[ ! -e "$plugin_stage/UFO.vst3" ]] || { echo 'Plugin destination changed during install.' >&2; exit 1; }
-installed_plugin=true
-codesign --verify --deep --strict "$app_target"
-codesign --verify --deep --strict "$plugin_target"
+# Stage on each destination filesystem. Retain every old bundle before installing.
+for index in "${!bundle_names[@]}"; do
+  if [[ -d "${targets[index]}" ]]; then
+    backups[index]=$(mktemp -d "${parents[index]}/UFO-backup.XXXXXX")
+    mv "${targets[index]}" "${backups[index]}/"
+  fi
+done
+for index in "${!bundle_names[@]}"; do
+  staged="${stages[index]}/${bundle_names[index]}"
+  mv -n "$staged" "${parents[index]}/"
+  [[ ! -e "$staged" ]] || { echo "${bundle_labels[index]} destination changed during install." >&2; exit 1; }
+  installed[index]=true
+done
+for target in "${targets[@]}"; do codesign --verify --deep --strict "$target"; done
 success=true
-[[ -z "$app_backup" ]] || printf 'Previous app preserved in: %s\n' "$app_backup"
-[[ -z "$plugin_backup" ]] || printf 'Previous VST3 preserved in: %s\n' "$plugin_backup"
-printf 'Installed app: %s\nInstalled VST3: %s\n' "$app_target" "$plugin_target"
-echo 'Open the app or rescan VST3 instruments in your DAW.'
+for index in "${!bundle_names[@]}"; do
+  [[ -z "${backups[index]}" ]] || printf 'Previous %s preserved in: %s\n' "${bundle_labels[index]}" "${backups[index]}"
+  printf 'Installed %s: %s\n' "${bundle_labels[index]}" "${targets[index]}"
+done
+echo 'Reopen Logic Pro and choose AU Instruments > MP Audio > UFO on a software instrument track.'
+echo 'If needed, find UFO in Logic Plug-in Manager and use Reset & Rescan Selection.'
+echo 'The VST3 remains available for VST3 hosts; open the standalone app for direct audio/MIDI use.'
 if [[ "$packaged" == true ]]; then
-  echo 'Audition the installed app and VST3 in your DAW; record human listening observations separately from automated test logs.'
+  echo 'Record human listening and Logic session observations separately from automated test logs.'
 else
-  echo 'Run scripts/listen-macos.sh for an output-device audition; human/DAW observations remain separate.'
+  echo 'Run scripts/listen-macos.sh for an output-device audition; human/Logic observations remain separate.'
 fi
