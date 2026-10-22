@@ -1,0 +1,81 @@
+name: Validate UFO macOS package
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Workflow run containing the unchanged 7eeaf5f universal binaries
+        required: true
+        default: '39827001446'
+        type: string
+  push:
+    paths:
+      - .github/workflows/validate-macos-package.yml
+      - scripts/validate-macos-package.sh
+permissions:
+  contents: read
+  actions: read
+jobs:
+  installer-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check current installation and AU registration transactions
+        run: |
+          python3 Tests/MacInstallerTests.py
+          python3 Tests/MacAURegistrationTests.py
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Record native Mac capabilities
+        run: |
+          scripts/probe-macos-runner.sh
+          test "$(uname -m)" = "${{ matrix.arch }}"
+      - name: Download unchanged universal production bundles
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run || '39827001446' }}
+          name: UFO-macOS-universal-development-arm64
+          path: dist/upstream-package
+      - name: Download matching native CTest evidence
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run || '39827001446' }}
+          name: UFO-macOS-native-validation-${{ matrix.arch }}
+          path: dist/upstream-validation
+      - name: Validate current installer and real AU/VST3 hosts against unchanged binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UFO_SOURCE_BUILD_RUN: ${{ inputs.source_run || '39827001446' }}
+          UFO_NATIVE_ARCH: ${{ matrix.arch }}
+        run: scripts/validate-macos-package.sh
+      - name: Preserve current native validation and explicitly inherited CTests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UFO-macOS-native-validation-${{ matrix.arch }}
+          path: dist/validation/
+          if-no-files-found: warn
+      - name: Preserve validated local installation package
+        uses: actions/upload-artifact@v4
+        with:
+          name: UFO-macOS-universal-development-${{ matrix.arch }}
+          path: |
+            dist/UFO-macOS-universal-unsigned.zip
+            dist/UFO-macOS-universal-unsigned.provenance.json
+          if-no-files-found: error

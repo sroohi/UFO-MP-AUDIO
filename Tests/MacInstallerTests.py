@@ -42,11 +42,12 @@ exit 1
 mode="${UFO_TEST_AU_MODE:-ready}"
 if [ "$#" = 1 ] && [ "$1" = -a ]; then
   case "$mode" in
-    stale|refresh_absent|refresh_error)
+    stale|term_exits|refresh_error)
       [ -f "$UFO_TEST_REGISTRAR_STATE" ] || exit 21 ;;
     missing) exit 22 ;;
   esac
   echo 'aumu Ufo1 MpAu MP Audio: UFO'
+  echo running > "$UFO_TEST_REGISTRAR_PROCESS"
   exit 0
 fi
 [ "$#" = 4 ] && [ "$1" = -v ] && [ "$2" = aumu ] && [ "$3" = Ufo1 ] && [ "$4" = MpAu ] || exit 23
@@ -62,13 +63,17 @@ case "$mode" in
 esac
 echo 'AU VALIDATION SUCCEEDED.'
 ''',
-        "killall": '''[ "$#" = 4 ] && [ "$1" = -TERM ] && [ "$2" = -u ] && [ "$3" = "$(id -un)" ] && [ "$4" = AudioComponentRegistrar ] || exit 30
-printf '%s\\n' "$@" >> "$UFO_TEST_REFRESH_LOG"
+        "ps": '''[ -f "$UFO_TEST_REGISTRAR_PROCESS" ] || { [ "$1" = -axo ] && exit 0; exit 1; }
+if [ "$1" = -p ]; then [ "$2" = 42424 ] || exit 1; fi
+printf '42424 %s Thu Oct 22 18:00:00 2026 /System/Library/Frameworks/AudioToolbox.framework/AudioComponentRegistrar\\n' "$(id -u)"
+''',
+        "kill": '''[ "$#" = 2 ] && [ "$2" = 42424 ] || exit 30
+case "$1" in -TERM|-KILL) ;; *) exit 30 ;; esac
+printf '%s %s\\n' "$1" "$2" >> "$UFO_TEST_REFRESH_LOG"
 [ "${UFO_TEST_AU_MODE:-}" != refresh_error ] || { echo 'Operation not permitted' >&2; exit 31; }
-touch "$UFO_TEST_REGISTRAR_STATE"
-if [ "${UFO_TEST_AU_MODE:-}" = refresh_absent ]; then
-  echo 'No matching processes belonging to you were found' >&2
-  exit 1
+if [ "$1" = -KILL ] || [ "${UFO_TEST_AU_MODE:-}" = term_exits ]; then
+  rm -f "$UFO_TEST_REGISTRAR_PROCESS"
+  touch "$UFO_TEST_REGISTRAR_STATE"
 fi
 ''',
         "codesign": '''for arg do target="$arg"; done
@@ -91,7 +96,6 @@ printf '%s\\n' "$3" >> "$UFO_TEST_XATTR_LOG"
     environment = os.environ.copy()
     environment["PATH"] = str(tools) + os.pathsep + environment["PATH"]
     environment["UFO_INSTALL_ROOT"] = str(destination)
-    current_user = subprocess.check_output(["id", "-un"], text=True).strip()
     binaries = [destination / parent / name / "Contents/MacOS/UFO" for name, parent, _ in BUNDLES]
 
     invocation_count = 0
@@ -106,6 +110,8 @@ printf '%s\\n' "$3" >> "$UFO_TEST_XATTR_LOG"
         result["UFO_TEST_REGISTRAR_STATE"] = str(evidence / "registrar-refreshed")
         result["UFO_TEST_REFRESH_LOG"] = str(evidence / "refresh.log")
         result["UFO_TEST_AU_PID_LOG"] = str(evidence / "auval.pid")
+        result["UFO_TEST_REGISTRAR_PROCESS"] = str(evidence / "registrar-running")
+        (evidence / "registrar-running").write_text("running")
         return result, evidence
 
     def install(*arguments, fail_target=None, fail_quarantine=False, running_logic=False, au_mode="ready"):
@@ -177,12 +183,12 @@ printf '%s\\n' "$3" >> "$UFO_TEST_XATTR_LOG"
     expect_versions("stable")
     lock.rmdir()
 
-    for mode in ("stale", "refresh_absent"):
+    for mode in ("stale", "term_exits"):
         refreshed = install("--replace", au_mode=mode)
         assert refreshed.returncode == 0, refreshed.stderr
         expect_versions("new")
         calls = (refreshed.evidence / "refresh.log").read_text().splitlines()
-        assert calls == ["-TERM", "-u", current_user, "AudioComponentRegistrar"]
+        assert calls == (["-TERM 42424", "-KILL 42424"] if mode == "stale" else ["-TERM 42424"])
         assert not lock.exists(), "Successful refresh left a transaction lock"
         for binary, (_, _, label) in zip(binaries, BUNDLES):
             binary.write_text("stable-" + label)

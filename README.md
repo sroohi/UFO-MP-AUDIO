@@ -32,7 +32,7 @@ On macOS the default library is `~/Library/MP Audio/UFO`, with `Presets` and `Sa
 
 ## Install the GitHub Actions Mac build
 
-After a successful **Build UFO** workflow run, download `UFO-macOS-universal-development-arm64` or `UFO-macOS-universal-development-x86_64` from that run's **Artifacts**. Both contain universal binaries; the suffix identifies the architecture used for native validation. Download the matching `UFO-macOS-native-validation-*` artifact for logs, screenshots, GPU diagnostics, `UFO-au-audition.wav` and `UFO-vst3-audition.wav`.
+After a successful **Build UFO** or **Validate UFO macOS package** workflow run, download `UFO-macOS-universal-development-arm64` or `UFO-macOS-universal-development-x86_64` from that run's **Artifacts**. Both contain universal binaries; the suffix identifies the architecture used for native validation. The package-only workflow verifies unchanged C++ sources and bundle contents, applies the current installer, and repeats native wrapper and installation checks; its earlier CTest/shader evidence is labeled separately in the [validation record](docs/VALIDATION.md). Download the matching `UFO-macOS-native-validation-*` artifact for logs, screenshots, GPU diagnostics, `UFO-au-audition.wav` and `UFO-vst3-audition.wav`.
 
 With GitHub CLI, set `RUN_ID` to that successful run's numeric ID and download:
 

@@ -35,7 +35,6 @@ installed_identity=''
 backup=''
 validation_completed=false
 registrar_refresh_used=false
-registrar_user=$(id -un)
 validator_pid=''
 stop_validator() {
   if [[ -n "$validator_pid" ]]; then
@@ -66,19 +65,146 @@ run_auval() {
   validator_pid=''
   return "$result"
 }
+# Refresh only a captured, current-user Apple AudioComponentRegistrar identity.
+# No process-name-wide KILL, cache deletion, sudo, or audio-device service restart.
+_ufo_registrar_trusted_path() {
+  case "$1" in
+    *'/../'*|*'/./'*|*'//'*) return 1 ;;
+    /System/Library/Frameworks/AudioToolbox.framework/AudioComponentRegistrar|/System/Library/Frameworks/AudioToolbox.framework/*/AudioComponentRegistrar) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+_ufo_registrar_identity() {
+  local row=$1 pid uid weekday month day clock year executable
+  IFS=$' \t' read -r pid uid weekday month day clock year executable <<< "$row"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$uid" =~ ^[0-9]+$ && "$weekday" =~ ^[A-Za-z]{3}$ && "$month" =~ ^[A-Za-z]{3}$ && "$day" =~ ^[0-9]{1,2}$ && "$clock" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ && "$year" =~ ^[0-9]{4}$ && -n "$executable" ]] || return 2
+  printf '%s|%s|%s %s %s %s %s|%s' "$pid" "$uid" "$weekday" "$month" "$day" "$clock" "$year" "$executable"
+}
+_ufo_registrar_snapshot() {
+  local pid=$1 log=$2 output result=0 error_file="$2.ps-errors"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+  output=$(LC_ALL=C ps -p "$pid" -o pid=,uid=,lstart=,comm= 2> "$error_file") || result=$?
+  if [[ -s "$error_file" ]]; then
+    cat "$error_file" >&2
+    rm -f "$error_file"
+    return 2
+  fi
+  rm -f "$error_file"
+  if [[ -z "$output" && ( "$result" == 0 || "$result" == 1 ) ]]; then return 1; fi
+  [[ "$result" == 0 && "$output" != *$'\n'* ]] || return 2
+  _ufo_registrar_identity "$output"
+}
+_ufo_registrar_same_identity() {
+  local pid=$1 expected=$2 log=$3 current result
+  if current=$(_ufo_registrar_snapshot "$pid" "$log"); then
+    if [[ "$current" != "$expected" ]]; then
+      printf 'Refusing further signals: PID %s identity changed. Expected %s; observed %s.\n' "$pid" "$expected" "$current"
+      return 2
+    fi
+    return 0
+  else
+    result=$?
+    if [[ "$result" == 1 ]]; then return 1; fi
+    printf 'Cannot verify registrar PID %s identity; no further signal is safe.\n' "$pid"
+    return 2
+  fi
+}
+_ufo_refresh_owned_registrar() {
+  local log=$1 owner_uid rows result=0 error_file="$1.ps-errors" row pid uid weekday month day clock year executable identity current attempt gone
+  local candidates=("")
+  owner_uid=$(id -u) || return 1
+  [[ "$owner_uid" =~ ^[0-9]+$ ]] || return 1
+  rows=$(LC_ALL=C ps -axo pid=,uid=,lstart=,comm= 2> "$error_file") || result=$?
+  if [[ "$result" != 0 || -s "$error_file" ]]; then
+    printf 'Cannot enumerate registrar identities (ps exit %s).\n' "$result"
+    cat "$error_file"
+    rm -f "$error_file"
+    return 1
+  fi
+  rm -f "$error_file"
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    IFS=$' \t' read -r pid uid weekday month day clock year executable <<< "$row"
+    [[ "$uid" == "$owner_uid" ]] || continue
+    _ufo_registrar_trusted_path "$executable" || continue
+    identity=$(_ufo_registrar_identity "$row") || { printf 'Malformed registrar identity; refusing signals.\n'; return 1; }
+    candidates[${#candidates[@]}]=$identity
+  done <<< "$rows"
+  if [[ ${#candidates[@]} == 1 ]]; then
+    printf 'No current-user Apple AudioComponentRegistrar was running; the next AU query starts it.\n'
+    return 0
+  fi
+  for identity in "${candidates[@]}"; do
+    [[ -n "$identity" ]] || continue
+    IFS='|' read -r pid uid current executable <<< "$identity"
+    printf 'Captured registrar identity: %s\n' "$identity"
+    if _ufo_registrar_same_identity "$pid" "$identity" "$log"; then :; else
+      result=$?
+      if [[ "$result" == 1 ]]; then printf 'PID %s exited before TERM; no signal sent.\n' "$pid"; continue; fi
+      return 1
+    fi
+    if env kill -TERM "$pid"; then
+      printf 'Sent TERM to verified current-user Apple registrar PID %s.\n' "$pid"
+    else
+      result=$?
+      printf 'TERM returned %s for PID %s.\n' "$result" "$pid"
+      if _ufo_registrar_same_identity "$pid" "$identity" "$log"; then return 1; else
+        result=$?
+        if [[ "$result" == 1 ]]; then printf 'PID %s exited concurrently with TERM.\n' "$pid"; continue; fi
+        return 1
+      fi
+    fi
+    gone=false
+    for attempt in 1 2 3 4; do
+      sleep .25
+      if _ufo_registrar_same_identity "$pid" "$identity" "$log"; then :; else
+        result=$?
+        if [[ "$result" == 1 ]]; then gone=true; break; fi
+        return 1
+      fi
+    done
+    if [[ "$gone" == true ]]; then printf 'PID %s exited after TERM.\n' "$pid"; continue; fi
+    # Revalidate immediately before escalation; never signal a reused or changed PID.
+    if _ufo_registrar_same_identity "$pid" "$identity" "$log"; then :; else
+      result=$?
+      if [[ "$result" == 1 ]]; then printf 'PID %s exited before KILL; no escalation sent.\n' "$pid"; continue; fi
+      return 1
+    fi
+    if env kill -KILL "$pid"; then
+      printf 'Sent KILL only to unchanged surviving Apple registrar PID %s.\n' "$pid"
+    else
+      result=$?
+      printf 'KILL returned %s for PID %s.\n' "$result" "$pid"
+      if _ufo_registrar_same_identity "$pid" "$identity" "$log"; then return 1; else
+        result=$?
+        if [[ "$result" == 1 ]]; then printf 'PID %s exited concurrently with KILL.\n' "$pid"; continue; fi
+        return 1
+      fi
+    fi
+    for attempt in 1 2 3 4 5 6 7 8; do
+      sleep .25
+      if _ufo_registrar_same_identity "$pid" "$identity" "$log"; then :; else
+        result=$?
+        if [[ "$result" == 1 ]]; then gone=true; break; fi
+        return 1
+      fi
+    done
+    if [[ "$gone" != true ]]; then printf 'Verified registrar PID %s did not exit after KILL.\n' "$pid"; return 1; fi
+    printf 'PID %s is absent after verified KILL.\n' "$pid"
+  done
+}
+refresh_owned_registrar() {
+  local log=$1
+  : > "$log"
+  _ufo_refresh_owned_registrar "$log" >> "$log" 2>&1
+}
+
 refresh_registrar() {
   local phase=$1 result=0 refresh_log="$artifacts/registrar-$1.log"
   registrar_refresh_used=true
-  # Apple's killall documents -u as an owner restriction, and the positional
-  # process name is exact. Never signal coreaudiod, another user, or all services.
-  LC_ALL=C killall -TERM -u "$registrar_user" AudioComponentRegistrar > "$refresh_log" 2>&1 || result=$?
-  printf 'Registrar refresh (%s): SIGTERM for user %s / AudioComponentRegistrar; exit %s.\n' "$phase" "$registrar_user" "$result" >> "$artifacts/registration.txt"
-  if [[ "$result" == 0 ]]; then return 0; fi
-  if [[ "$result" == 1 ]] && awk '/^No matching processes (belonging to you )?were found$/ {found=1} END {exit !found}' "$refresh_log"; then
-    printf 'Registrar refresh (%s): no owned service was running; the next AU query starts it.\n' "$phase" >> "$artifacts/registration.txt"
-    return 0
-  fi
-  cat "$refresh_log" >&2
+  refresh_owned_registrar "$refresh_log" || result=$?
+  printf 'Registrar refresh (%s): verified current-user Apple PID refresh; exit %s.\n' "$phase" "$result" >> "$artifacts/registration.txt"
+  if [[ "$result" != 0 ]]; then cat "$refresh_log" >&2; fi
   return "$result"
 }
 discover_component() {
@@ -159,7 +285,7 @@ codesign --verify --deep --strict "$target"
   printf 'Native architecture: '; uname -m
   printf 'Validated binary SHA256: '; shasum -a 256 "$target/Contents/MacOS/UFO" | awk '{print $1}'
   printf 'Previous user AU preserved during test: %s\n' "$([[ -n "$backup" ]] && echo yes || echo no)"
-  printf 'Registry refresh: owned bundle timestamps and bounded discovery; per-user registrar SIGTERM only if needed. No cache files are deleted.\n'
+  printf 'Registry refresh: owned bundle timestamps and bounded discovery; verified current-user Apple registrar TERM, then identity-checked KILL only if needed. No cache files are deleted.\n'
 } > "$artifacts/registration.txt"
 if ! discover_component; then
   cp "$artifacts/discovery.log" "$artifacts/discovery-before-refresh.log"
