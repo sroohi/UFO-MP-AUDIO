@@ -36,6 +36,8 @@ jobs:
           test "$(uname -m)" = "${{ matrix.arch }}"
       - name: Build and validate universal app, VST3 and Logic Audio Unit
         run: scripts/build-macos.sh
+      - name: Install the packaged app, VST3 and AU on the disposable Mac
+        run: scripts/test-macos-installation.sh
       - name: Preserve native test logs and editor captures
         if: always()
         uses: actions/upload-artifact@v4

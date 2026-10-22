@@ -5,6 +5,9 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import shlex
+import sys
+import time
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 BUNDLES = (
@@ -23,6 +26,7 @@ with tempfile.TemporaryDirectory(prefix="ufo-installer-test-") as temporary:
         binary.parent.mkdir(parents=True)
         binary.write_text("new-" + label)
         binary.chmod(0o700)
+        (binary.parents[1] / "Info.plist").write_text("fixture metadata")
     tools = root / "tools"
     tools.mkdir()
     mocks = {
@@ -32,6 +36,41 @@ if [ "${UFO_TEST_RUNNING_LOGIC:-}" = 1 ] && [ "$process" = "Logic Pro" ]; then e
 exit 1
 ''',
         "lipo": '[ "$#" -eq 3 ] && [ -f "$1" ] && [ "$2" = "-verify_arch" ] && [ "$3" = x86_64 ]\n',
+        "stat": "exec " + shlex.quote(sys.executable) + """ -c 'import os,sys; s=os.lstat(sys.argv[1]); print(str(s.st_dev)+":"+str(s.st_ino))' "$3"\n""",
+        "auval": '''component="$UFO_INSTALL_ROOT/Library/Audio/Plug-Ins/Components/UFO.component"
+[ -f "$component/Contents/MacOS/UFO" ] || exit 20
+mode="${UFO_TEST_AU_MODE:-ready}"
+if [ "$#" = 1 ] && [ "$1" = -a ]; then
+  case "$mode" in
+    stale|refresh_absent|refresh_error)
+      [ -f "$UFO_TEST_REGISTRAR_STATE" ] || exit 21 ;;
+    missing) exit 22 ;;
+  esac
+  echo 'aumu Ufo1 MpAu MP Audio: UFO'
+  exit 0
+fi
+[ "$#" = 4 ] && [ "$1" = -v ] && [ "$2" = aumu ] && [ "$3" = Ufo1 ] && [ "$4" = MpAu ] || exit 23
+case "$mode" in
+  validation_error) echo 'AU VALIDATION FAILED'; exit 24 ;;
+  invalid_output) echo 'No validation was performed'; exit 0 ;;
+  hanging) echo "$$" > "$UFO_TEST_AU_PID_LOG"; exec sleep 20 ;;
+  external_replacement)
+    mv "$component" "$component.external-held"
+    mkdir -p "$component/Contents/MacOS"
+    echo replacement-au > "$component/Contents/MacOS/UFO"
+    exit 25 ;;
+esac
+echo 'AU VALIDATION SUCCEEDED.'
+''',
+        "killall": '''[ "$#" = 4 ] && [ "$1" = -TERM ] && [ "$2" = -u ] && [ "$3" = "$(id -un)" ] && [ "$4" = AudioComponentRegistrar ] || exit 30
+printf '%s\\n' "$@" >> "$UFO_TEST_REFRESH_LOG"
+[ "${UFO_TEST_AU_MODE:-}" != refresh_error ] || { echo 'Operation not permitted' >&2; exit 31; }
+touch "$UFO_TEST_REGISTRAR_STATE"
+if [ "${UFO_TEST_AU_MODE:-}" = refresh_absent ]; then
+  echo 'No matching processes belonging to you were found' >&2
+  exit 1
+fi
+''',
         "codesign": '''for arg do target="$arg"; done
 if [ "${UFO_TEST_FAIL_TARGET:-}" = "$target" ]; then exit 7; fi
 exit 0
@@ -52,19 +91,36 @@ printf '%s\\n' "$3" >> "$UFO_TEST_XATTR_LOG"
     environment = os.environ.copy()
     environment["PATH"] = str(tools) + os.pathsep + environment["PATH"]
     environment["UFO_INSTALL_ROOT"] = str(destination)
+    current_user = subprocess.check_output(["id", "-un"], text=True).strip()
     binaries = [destination / parent / name / "Contents/MacOS/UFO" for name, parent, _ in BUNDLES]
 
-    def install(*arguments, fail_target=None, fail_quarantine=False, running_logic=False):
-        invocation_environment = environment.copy()
+    invocation_count = 0
+
+    def invocation_environment(au_mode="ready"):
+        global invocation_count
+        invocation_count += 1
+        evidence = root / ("invocation-" + str(invocation_count))
+        evidence.mkdir()
+        result = environment.copy()
+        result["UFO_TEST_AU_MODE"] = au_mode
+        result["UFO_TEST_REGISTRAR_STATE"] = str(evidence / "registrar-refreshed")
+        result["UFO_TEST_REFRESH_LOG"] = str(evidence / "refresh.log")
+        result["UFO_TEST_AU_PID_LOG"] = str(evidence / "auval.pid")
+        return result, evidence
+
+    def install(*arguments, fail_target=None, fail_quarantine=False, running_logic=False, au_mode="ready"):
+        command_environment, evidence = invocation_environment(au_mode)
         if fail_target:
-            invocation_environment["UFO_TEST_FAIL_TARGET"] = str(fail_target)
+            command_environment["UFO_TEST_FAIL_TARGET"] = str(fail_target)
         if fail_quarantine:
-            invocation_environment["UFO_TEST_QUARANTINE"] = "1"
-            invocation_environment["UFO_TEST_XATTR_FAIL"] = "1"
+            command_environment["UFO_TEST_QUARANTINE"] = "1"
+            command_environment["UFO_TEST_XATTR_FAIL"] = "1"
         if running_logic:
-            invocation_environment["UFO_TEST_RUNNING_LOGIC"] = "1"
-        return subprocess.run(["bash", str(project / "scripts/install-local-macos.sh"), *arguments],
-                              env=invocation_environment, text=True, capture_output=True)
+            command_environment["UFO_TEST_RUNNING_LOGIC"] = "1"
+        result = subprocess.run(["bash", str(project / "scripts/install-local-macos.sh"), *arguments],
+                                env=command_environment, text=True, capture_output=True)
+        result.evidence = evidence
+        return result
 
     def expect_versions(prefix):
         for binary, (_, _, label) in zip(binaries, BUNDLES):
@@ -86,6 +142,8 @@ printf '%s\\n' "$3" >> "$UFO_TEST_XATTR_LOG"
     first = install()
     assert first.returncode == 0, first.stderr
     expect_versions("new")
+    assert not (first.evidence / "refresh.log").exists(), "Normal discovery unnecessarily refreshed the registrar"
+    assert "Apple Audio Unit validation passed. Logs:" in first.stdout
     refused = install()
     assert refused.returncode != 0 and "Already exists" in refused.stderr
     expect_versions("new")
@@ -111,6 +169,68 @@ printf '%s\\n' "$3" >> "$UFO_TEST_XATTR_LOG"
     for _, parent, _ in BUNDLES:
         assert not list((destination / parent).glob(".ufo-install.*")), "Staging directory survived rollback"
 
+    lock = destination / BUNDLES[2][1] / ".ufo-au-validation.lock"
+    lock.mkdir()
+    locked = install("--replace")
+    assert locked.returncode != 0 and "Another UFO install or validation" in locked.stderr
+    assert lock.is_dir(), "Installer removed another transaction's lock"
+    expect_versions("stable")
+    lock.rmdir()
+
+    for mode in ("stale", "refresh_absent"):
+        refreshed = install("--replace", au_mode=mode)
+        assert refreshed.returncode == 0, refreshed.stderr
+        expect_versions("new")
+        calls = (refreshed.evidence / "refresh.log").read_text().splitlines()
+        assert calls == ["-TERM", "-u", current_user, "AudioComponentRegistrar"]
+        assert not lock.exists(), "Successful refresh left a transaction lock"
+        for binary, (_, _, label) in zip(binaries, BUNDLES):
+            binary.write_text("stable-" + label)
+
+    for mode in ("missing", "refresh_error", "validation_error", "invalid_output"):
+        invalid = install("--replace", au_mode=mode)
+        assert invalid.returncode != 0, "Invalid AU discovery/validation was accepted: " + mode
+        expect_versions("stable")
+        assert not lock.exists(), "Failed validation left a transaction lock"
+        assert (invalid.evidence / "refresh.log").exists(), "Rollback did not refresh restored AU metadata"
+
+    # A signal while auval is running must stop the owned child and restore all bundles.
+    interrupted_environment, interrupted_evidence = invocation_environment("hanging")
+    process = subprocess.Popen(["bash", str(project / "scripts/install-local-macos.sh"), "--replace"],
+                               env=interrupted_environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 10
+    pid_log = interrupted_evidence / "auval.pid"
+    while not pid_log.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert pid_log.exists(), "Interrupted-install fixture never reached native validation"
+    validator_pid = int(pid_log.read_text())
+    process.terminate()
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode != 0, stdout + stderr
+    expect_versions("stable")
+    assert not lock.exists(), "Interrupted installation left a lock"
+    try:
+        os.kill(validator_pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("Interrupted installation left its auval process running")
+
+    # Preserve an unrelated replacement and the old AU recovery backup on rollback.
+    backup_pattern = "UFO-backup.*/UFO.component/Contents/MacOS/UFO"
+    old_recoveries = set((destination / BUNDLES[2][1]).glob(backup_pattern))
+    changed = install("--replace", au_mode="external_replacement")
+    assert changed.returncode != 0 and "target changed" in changed.stderr
+    assert binaries[2].read_text().strip() == "replacement-au"
+    recovery = set((destination / BUNDLES[2][1]).glob(backup_pattern)) - old_recoveries
+    recoverable = [p for p in recovery if p.read_text() == "stable-au"]
+    assert len(recoverable) == 1, "Previous AU was not preserved for recovery"
+    au_path = binaries[2].parents[2]
+    shutil.rmtree(au_path)
+    shutil.rmtree(au_path.with_name("UFO.component.external-held"))
+    recoverable[0].parents[2].rename(au_path)
+    expect_versions("stable")
+
     # Never replace a component symlink or mutate its referent, even with --replace.
     au_target = binaries[2].parents[2]
     held_target = au_target.with_name("UFO-held.component")
@@ -131,7 +251,7 @@ printf '%s\\n' "$3" >> "$UFO_TEST_XATTR_LOG"
     shutil.copytree(project / "dist/UFO", package)
     shutil.copy2(project / "scripts/install-local-macos.sh", package / "Install.command")
     package_destination = root / "package-installation"
-    package_environment = environment.copy()
+    package_environment, _ = invocation_environment()
     package_environment["UFO_INSTALL_ROOT"] = str(package_destination)
     quarantine_log = root / "quarantine-cleared.txt"
     package_environment["UFO_TEST_QUARANTINE"] = "1"
@@ -147,4 +267,4 @@ printf '%s\\n' "$3" >> "$UFO_TEST_XATTR_LOG"
                                  for path in cleared_paths), "Quarantine clearing escaped owned staging directories"
     assert any("/UFO.component" in path for path in cleared_paths), "AU quarantine was never checked"
 
-print("PASS: mocked app/VST3/AU source and packaged installation, Logic guard, scoped quarantine, backups and three-bundle rollback")
+print("PASS: mocked app/VST3/AU installation, scoped registrar refresh, AU validation failure/interruption rollback, lock/ownership guards, quarantine and backups")

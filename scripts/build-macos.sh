@@ -11,8 +11,18 @@ mkdir -p dist/validation
 cmake -S . -B build-macos -G "Unix Makefiles" \
   -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_BUILD_TYPE=Release 2>&1 | tee dist/validation/configure.log
+cp build-macos/ufo-architecture-targets.txt dist/validation/architectures.txt
+test_targets=(ufo_engine_tests ufo_sample_tests ufo_streaming_tests ufo_stream_asset_tests ufo_plugin_tests ufo_gpu_tests ufo_vst3_host_tests)
 cmake --build build-macos --config Release --parallel 3 \
-  --target UFO_Standalone UFO_VST3 UFO_AU ufo_engine_tests ufo_sample_tests ufo_streaming_tests ufo_stream_asset_tests ufo_plugin_tests ufo_gpu_tests ufo_vst3_host_tests 2>&1 | tee dist/validation/build.log
+  --target UFO_Standalone UFO_VST3 UFO_AU "${test_targets[@]}" 2>&1 | tee dist/validation/build.log
+{
+  native_arch=$(uname -m)
+  for test_target in "${test_targets[@]}"; do
+    built_arch=$(lipo "$PWD/build-macos/$test_target" -archs)
+    printf '%s: %s\n' "$test_target" "$built_arch"
+    [[ "$built_arch" == "$native_arch" ]] || { echo "Unexpected test architecture for $test_target; expected only $native_arch." >&2; exit 1; }
+  done
+} | tee dist/validation/test-architectures.txt
 UFO_SCREENSHOT="$PWD/dist/validation/UFO-native-editor.png" \
 UFO_GPU_ARTIFACT_DIR="$PWD/dist/validation/gpu" \
   ctest --test-dir build-macos -C Release --output-on-failure 2>&1 | tee dist/validation/ctest.log

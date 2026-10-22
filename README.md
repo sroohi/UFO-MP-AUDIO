@@ -51,7 +51,7 @@ For a browser download, extract the outer Actions ZIP; then extract `UFO-macOS-u
 ./Install.command --replace
 ```
 
-Quit Logic Pro X and the standalone UFO app before installing or updating. The installer checks native architecture and signatures, stages all three bundles, clears download quarantine on those verified copies, and rolls back its own partial installation on failure. It installs to:
+Quit Logic Pro X and the standalone UFO app before installing or updating. The installer checks native architecture and signatures, stages all three bundles, clears download quarantine on those verified copies, and requires Apple's Audio Unit validator to pass before completing installation. It rolls back its own partial installation on failure. If filesystem discovery leaves a stale registration, it refreshes only the current user's AudioComponentRegistrar metadata service. It installs to:
 
 - `~/Applications/UFO.app`
 - `~/Library/Audio/Plug-Ins/Components/UFO.component`

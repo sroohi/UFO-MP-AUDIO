@@ -15,6 +15,10 @@ for logic_process in 'Logic Pro' 'Logic Pro X'; do
   fi
 done
 command -v auval >/dev/null || { echo 'Apple auval is required.' >&2; exit 1; }
+discovery_seconds=${UFO_AU_DISCOVERY_SECONDS:-15}
+validation_seconds=${UFO_AU_VALIDATION_SECONDS:-90}
+[[ "$discovery_seconds" =~ ^([1-9]|[1-5][0-9]|60)$ ]] || { echo 'AU discovery budget must be 1-60 seconds.' >&2; exit 1; }
+[[ "$validation_seconds" =~ ^[1-9][0-9]*$ && ${#validation_seconds} -le 3 ]] && (( validation_seconds <= 600 )) || { echo 'AU validation budget must be 1-600 seconds.' >&2; exit 1; }
 codesign --verify --deep --strict "$component"
 # The override supports isolated transaction tests; native AU discovery uses the
 # normal user Library, which is always the default.
@@ -30,10 +34,71 @@ installed=false
 installed_identity=''
 backup=''
 validation_completed=false
+registrar_refresh_used=false
+registrar_user=$(id -un)
+validator_pid=''
+stop_validator() {
+  if [[ -n "$validator_pid" ]]; then
+    if kill -0 "$validator_pid" 2>/dev/null; then
+      kill -TERM "$validator_pid" 2>/dev/null || true
+      sleep .25
+      kill -KILL "$validator_pid" 2>/dev/null || true
+    fi
+    wait "$validator_pid" 2>/dev/null || true
+    validator_pid=''
+  fi
+}
+run_auval() {
+  local output=$1 budget=$2 deadline result=0
+  shift 2
+  auval "$@" > "$output" 2>&1 &
+  validator_pid=$!
+  deadline=$((SECONDS+budget))
+  while kill -0 "$validator_pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      stop_validator
+      printf '\nApple auval timed out after %s seconds.\n' "$budget" >> "$output"
+      return 124
+    fi
+    sleep .25
+  done
+  wait "$validator_pid" || result=$?
+  validator_pid=''
+  return "$result"
+}
+refresh_registrar() {
+  local phase=$1 result=0 refresh_log="$artifacts/registrar-$1.log"
+  registrar_refresh_used=true
+  # Apple's killall documents -u as an owner restriction, and the positional
+  # process name is exact. Never signal coreaudiod, another user, or all services.
+  LC_ALL=C killall -TERM -u "$registrar_user" AudioComponentRegistrar > "$refresh_log" 2>&1 || result=$?
+  printf 'Registrar refresh (%s): SIGTERM for user %s / AudioComponentRegistrar; exit %s.\n' "$phase" "$registrar_user" "$result" >> "$artifacts/registration.txt"
+  if [[ "$result" == 0 ]]; then return 0; fi
+  if [[ "$result" == 1 ]] && awk '/^No matching processes (belonging to you )?were found$/ {found=1} END {exit !found}' "$refresh_log"; then
+    printf 'Registrar refresh (%s): no owned service was running; the next AU query starts it.\n' "$phase" >> "$artifacts/registration.txt"
+    return 0
+  fi
+  cat "$refresh_log" >&2
+  return "$result"
+}
+discover_component() {
+  local deadline=$((SECONDS+discovery_seconds)) remaining budget
+  while (( SECONDS < deadline )); do
+    remaining=$((deadline-SECONDS))
+    budget=$remaining
+    (( budget <= 5 )) || budget=5
+    if run_auval "$artifacts/discovery.log" "$budget" -a && awk '$1=="aumu" && $2=="Ufo1" && $3=="MpAu" {found=1} END {exit !found}' "$artifacts/discovery.log"; then
+      return 0
+    fi
+    sleep .25
+  done
+  return 1
+}
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
   set +e
+  stop_validator
   preserve=false
   if [[ "$installed" == true && ( -e "$target" || -L "$target" ) ]]; then
     current_identity=$(stat -f '%d:%i' "$target" 2>/dev/null)
@@ -54,6 +119,9 @@ cleanup() {
       preserve=true
       status=1
     fi
+  fi
+  if [[ "$registrar_refresh_used" == true ]]; then
+    refresh_registrar restored || status=1
   fi
   [[ "$preserve" == true || -z "$work" ]] || rm -rf "$work"
   rmdir "$lock" 2>/dev/null || status=1
@@ -82,25 +150,30 @@ mv -n "$work/UFO.component" "$components/"
 [[ ! -e "$work/UFO.component" ]] || { echo 'AU registration destination changed during validation.' >&2; exit 1; }
 installed=true
 installed_identity=$(stat -f '%d:%i' "$target")
+# ditto retains old build times. Make only this owned copy visibly newer than
+# an earlier registrar scan; changing timestamps does not alter signed contents.
+touch "$target" "$target/Contents/Info.plist"
 codesign --verify --deep --strict "$target"
 {
   printf 'Temporary user registration: %s\n' "$target"
   printf 'Native architecture: '; uname -m
   printf 'Validated binary SHA256: '; shasum -a 256 "$target/Contents/MacOS/UFO" | awk '{print $1}'
   printf 'Previous user AU preserved during test: %s\n' "$([[ -n "$backup" ]] && echo yes || echo no)"
-  printf 'Registry refresh: filesystem change and bounded discovery; no daemon kills or cache deletion.\n'
+  printf 'Registry refresh: owned bundle timestamps and bounded discovery; per-user registrar SIGTERM only if needed. No cache files are deleted.\n'
 } > "$artifacts/registration.txt"
-# AudioComponentRegistrar observes the directory change. Poll discovery without
-# terminating a shared audio service or deleting unrelated plug-in caches.
-discovered=false
-for attempt in {1..60}; do
-  if auval -a > "$artifacts/discovery.log" 2>&1 && awk '$1=="aumu" && $2=="Ufo1" && $3=="MpAu" {found=1} END {exit !found}' "$artifacts/discovery.log"; then
-    discovered=true
-    break
-  fi
-  sleep .25
-done
-[[ "$discovered" == true ]] || { echo 'The temporary UFO Audio Unit was not discovered.' >&2; cat "$artifacts/discovery.log" >&2; exit 1; }
-auval -v aumu Ufo1 MpAu 2>&1 | tee "$artifacts/auval.log"
+if ! discover_component; then
+  cp "$artifacts/discovery.log" "$artifacts/discovery-before-refresh.log"
+  refresh_registrar temporary
+  discover_component || { echo 'The temporary UFO Audio Unit was not discovered after a scoped registrar refresh.' >&2; cat "$artifacts/discovery.log" >&2; exit 1; }
+fi
+printf 'Discovered registered aumu/Ufo1/MpAu before validation.\n' >> "$artifacts/registration.txt"
+if run_auval "$artifacts/auval.log" "$validation_seconds" -v aumu Ufo1 MpAu; then
+  cat "$artifacts/auval.log"
+else
+  result=$?
+  cat "$artifacts/auval.log" >&2
+  exit "$result"
+fi
+awk '/AU VALIDATION SUCCEEDED/ {found=1} END {exit !found}' "$artifacts/auval.log" || { echo 'Apple auval did not report validation success.' >&2; exit 1; }
 "$host" "$target" "$artifacts" --au 2>&1 | tee "$artifacts/au-host.log"
 validation_completed=true
