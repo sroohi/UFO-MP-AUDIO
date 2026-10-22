@@ -12,7 +12,7 @@ constexpr int sampleRate=44100,seconds=31;
 constexpr juce::int64 frames=juce::int64(sampleRate)*seconds;
 int checks=0;
 void require(bool passed,const char* what) {++checks;if(!passed)throw std::runtime_error(what);}
-float signal(juce::int64 frame,int channel) {return float((channel==0?.6:.3)*std::sin(2*pi*(channel==0?200:311)*double(frame)/sampleRate));}
+float fixtureSample(juce::int64 frame,int channel) {return float((channel==0?.6:.3)*std::sin(2*pi*(channel==0?200:311)*double(frame)/sampleRate));}
 void writeWave(const juce::File& file) {
     auto output=file.createOutputStream();require(bool(output),"create source WAV");
     juce::WavAudioFormat wav;
@@ -20,7 +20,7 @@ void writeWave(const juce::File& file) {
     require(bool(writer),"create source WAV writer");juce::AudioBuffer<float> data(2,8192);
     for(juce::int64 first=0;first<frames;first+=8192) {
         const int count=int(std::min(juce::int64(8192),frames-first));
-        for(int channel=0;channel<2;++channel)for(int i=0;i<count;++i)data.setSample(channel,i,signal(first+i,channel));
+        for(int channel=0;channel<2;++channel)for(int i=0;i<count;++i)data.setSample(channel,i,fixtureSample(first+i,channel));
         require(writer->writeFromAudioSampleBuffer(data,0,count),"write real long-source WAV frames");
     }
     require(writer->flush(),"flush source WAV");
@@ -34,7 +34,7 @@ ufo::StreamAssetCache::Result build(const juce::File& source,const juce::File& c
 }
 float expectedAt(double position,int channel) {
     const auto first=juce::int64(position);const float fraction=float(position-double(first));
-    return signal(first,channel)+fraction*(signal(first+1,channel)-signal(first,channel));
+    return fixtureSample(first,channel)+fraction*(fixtureSample(first+1,channel)-fixtureSample(first,channel));
 }
 void corruptByte(const juce::File& file,juce::int64 position) {
     int byte;
@@ -118,7 +118,7 @@ int main() {
         require(canonicalReader->lengthInSamples==frames&&canonicalReader->sampleRate==sampleRate&&canonicalReader->numChannels==2,"canonical WAV preserves complete source dimensions");
         juce::AudioBuffer<float> lastFrames(2,32);
         require(canonicalReader->read(&lastFrames,0,32,frames-32,true,true),"canonical WAV seeks to actual final frames");
-        require(std::abs(lastFrames.getSample(1,31)-signal(frames-1,1))<1e-6,"canonical WAV retains final stereo sample");canonicalReader.reset();
+        require(std::abs(lastFrames.getSample(1,31)-fixtureSample(frames-1,1))<1e-6,"canonical WAV retains final stereo sample");canonicalReader.reset();
 
         const auto digest=juce::SHA256(asset.canonical).toHexString();
         const auto pyramid=cache.getChildFile(digest+".stream-v1"),manifest=pyramid.getChildFile("manifest.json");

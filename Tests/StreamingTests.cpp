@@ -30,12 +30,12 @@ void require(bool passed,const char* description) {
     ++checks;if(!passed){std::cerr<<"FAIL: "<<description<<'\n';std::exit(1);}
 }
 constexpr double pi=3.14159265358979323846;
-float signal(uint64_t frame,size_t channel) {return float((channel==0?.6:.3)*std::sin(2*pi*(channel==0?200:300)*double(frame)/48000));}
+float fixtureSample(uint64_t frame,size_t channel) {return float((channel==0?.6:.3)*std::sin(2*pi*(channel==0?200:300)*double(frame)/48000));}
 void writeFixture(const std::filesystem::path& path,uint64_t frames) {
     std::ofstream output(path,std::ios::binary);std::array<float,32768*2> block{};
     for(uint64_t first=0;first<frames;first+=32768) {
         const auto count=std::min<uint64_t>(32768,frames-first);
-        for(uint64_t i=0;i<count;++i)for(size_t c=0;c<2;++c)block[size_t(i)*2+c]=signal(first+i,c);
+        for(uint64_t i=0;i<count;++i)for(size_t c=0;c<2;++c)block[size_t(i)*2+c]=fixtureSample(first+i,c);
         output.write(reinterpret_cast<const char*>(block.data()),std::streamsize(count*8));
     }
     require(bool(output),"write longer-than-30-second streaming fixture");
@@ -57,7 +57,7 @@ int main() {
     for(int i=0;i<64;++i)bank.read(300,.75f,false,.5,state);
     const auto sample=bank.read(300,.75f,false,.5,state);
     const uint64_t position=uint64_t(.75*double(frames-4096))+300;
-    require(std::abs(sample[0]-signal(position,0))<1e-5 && std::abs(sample[1]-signal(position,1))<1e-5,"streamed source preserves actual stereo samples");
+    require(std::abs(sample[0]-fixtureSample(position,0))<1e-5 && std::abs(sample[1]-fixtureSample(position,1))<1e-5,"streamed source preserves actual stereo samples");
     require(bank.waveform(128).size()==128,"streamed overview returns requested UI bins");
     {
         auto sequential=std::make_shared<ufo::StreamingSource>(metadata);ufo::SampleBank sequentialBank(sequential);
@@ -68,7 +68,7 @@ int main() {
         while(!sequential->isResident(0,8192) && std::chrono::steady_clock::now()<limit)std::this_thread::sleep_for(std::chrono::milliseconds(1));
         require(sequential->isResident(0,8192),"a page hit queues read-ahead before playback reaches its boundary");
         const auto misses=sequentialBank.streamUnderruns();const auto next=sequentialBank.read(8192,0,true,.5);
-        require(sequentialBank.streamUnderruns()==misses && std::abs(next[0]-signal(8192,0))<1e-5,"sequential boundary reads without a cache-miss dropout");
+        require(sequentialBank.streamUnderruns()==misses && std::abs(next[0]-fixtureSample(8192,0))<1e-5,"sequential boundary reads without a cache-miss dropout");
     }
     {
         auto offline=std::make_shared<ufo::StreamingSource>(metadata);ufo::SampleBank offlineBank(offline);
@@ -76,11 +76,11 @@ int main() {
         const uint64_t seek=frames-12345;
         require(!offline->isResident(0,seek),"offline seek begins with an uncached page");
         const auto sought=offlineBank.read(double(seek),0,true,.5,offlineVoice,true);
-        require(std::abs(sought[0]-signal(seek,0))<1e-5 && std::abs(sought[1]-signal(seek,1))<1e-5,"explicit offline mode waits for uncached stereo data without dropping the first sample");
+        require(std::abs(sought[0]-fixtureSample(seek,0))<1e-5 && std::abs(sought[1]-fixtureSample(seek,1))<1e-5,"explicit offline mode waits for uncached stereo data without dropping the first sample");
         bool exact=true;const auto baseline=renderAllocations.load();watchAllocations=true;
         for(uint64_t frame=0;frame<frames;++frame) {
             const auto out=offlineBank.read(double(frame),0,true,.5,offlineVoice,true);
-            if(std::abs(out[0]-signal(frame,0))>1e-5 || std::abs(out[1]-signal(frame,1))>1e-5){exact=false;break;}
+            if(std::abs(out[0]-fixtureSample(frame,0))>1e-5 || std::abs(out[1]-fixtureSample(frame,1))>1e-5){exact=false;break;}
         }
         watchAllocations=false;
         require(exact,"faster-than-realtime sequential offline render matches every source sample beyond cache capacity");

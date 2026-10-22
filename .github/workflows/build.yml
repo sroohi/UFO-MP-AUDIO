@@ -29,7 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Record native Mac capabilities
-        run: scripts/probe-macos-runner.sh
+        run: |
+          scripts/probe-macos-runner.sh
+          test "$(uname -m)" = "${{ matrix.arch }}"
       - name: Build and validate universal app and actual VST3 wrapper
         run: scripts/build-macos.sh
       - name: Preserve native test logs and editor captures
