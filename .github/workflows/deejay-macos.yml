@@ -1,0 +1,130 @@
+name: DEEJ-AY
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["DeejAy/**", ".github/workflows/deejay-macos.yml"]
+    tags: ["deejay-v*"]
+  pull_request:
+    paths: ["DeejAy/**", ".github/workflows/deejay-macos.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: deejay-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-tests-linux:
+    name: Engine tests (Linux, no JUCE)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S DeejAy -B build-engine -DDEEJAY_BUILD_APP=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-engine -j
+      - name: Test
+        run: ./build-engine/deejay_tests
+
+  macos:
+    name: Build, sign, notarize (macOS)
+    runs-on: macos-15
+    env:
+      BUILD_TYPE: Release
+      APP_PATH: build/DeejAy_artefacts/Release/DEEJ-AY.app
+      # secrets are not allowed in step `if:` expressions, so expose their presence as a job env flag
+      HAS_SIGNING_SECRETS: ${{ secrets.MACOS_DEVELOPER_ID_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-${{ hashFiles('DeejAy/CMakeLists.txt') }}
+
+      - name: Configure (universal, macOS 13+)
+        run: >
+          cmake -S DeejAy -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=$BUILD_TYPE
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+
+      - name: Build engine tests and run them
+        run: |
+          cmake --build build --target deejay_tests -j
+          ./build/deejay_tests
+
+      - name: Build app
+        run: cmake --build build --target DeejAy -j
+
+      - name: Check the binary is universal
+        run: |
+          archs="$(lipo -archs "$APP_PATH/Contents/MacOS/DEEJ-AY")"
+          echo "$archs"
+          [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
+
+      - name: Version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/deejay-v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/deejay-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.1.0-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate
+        if: env.HAS_SIGNING_SECRETS == 'true'
+        env:
+          CERT: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain
+          echo "SIGNING_READY=1" >> "$GITHUB_ENV"
+
+      - name: Sign and notarize
+        if: env.SIGNING_READY == '1'
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: DeejAy/packaging/sign-and-notarize.sh "$APP_PATH"
+
+      - name: Ad-hoc sign (no Developer ID secrets configured)
+        if: env.SIGNING_READY != '1'
+        run: |
+          codesign --force --deep --sign - --entitlements DeejAy/packaging/DeejAy.entitlements "$APP_PATH"
+          echo "::warning::Built an ad-hoc signed app. Add the MACOS_* and APPLE_* secrets to produce a notarized Developer ID build."
+
+      - name: Package DMG
+        env:
+          SIGNING_IDENTITY: ${{ env.SIGNING_READY == '1' && secrets.MACOS_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ env.SIGNING_READY == '1' && secrets.APPLE_ID || '' }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: DeejAy/packaging/make-dmg.sh "$APP_PATH" "${{ steps.version.outputs.version }}" dist
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: DEEJ-AY-${{ steps.version.outputs.version }}-macOS
+          path: dist/*.dmg*
+          if-no-files-found: error
+
+      - name: GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/deejay-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: DEEJ-AY ${{ steps.version.outputs.version }}
+          files: dist/*.dmg*
+          draft: true
+          generate_release_notes: true
