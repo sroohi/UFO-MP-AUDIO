@@ -72,7 +72,7 @@ public:
 
     // `beat`: master beat position at the first sample (any origin; the leader deck's grid), or a negative
     // value when no deck leads, in which case an internal clock at `bpm` keeps time.
-    DJ_NONBLOCKING void process (float* l, float* r, int n, double bpm, double beat) noexcept;
+    void process (float* l, float* r, int n, double bpm, double beat) noexcept DJ_NONBLOCKING;
 
 private:
     enum TimeMode { kStutter = 0, kRepeat = 1, kTape = 2, kTimeModes = 3 };
