@@ -483,6 +483,7 @@ void Engine::process (const float* const*, int, float* const* outputs, int numOu
 {
     Command c;
     while (commands_.pop (c)) applyCommand (c);
+    while (midiCommands_.pop (c)) applyCommand (c);
     for (int ch = 0; ch < numOutputs; ++ch)
         if (outputs[ch] != nullptr) std::fill (outputs[ch], outputs[ch] + numFrames, 0.0f);
 

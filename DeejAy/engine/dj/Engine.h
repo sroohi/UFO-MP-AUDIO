@@ -94,6 +94,8 @@ public:
 
     // ---- message thread -----------------------------------------------------------------------
     bool post (const Command& c) noexcept { return commands_.push (c); }
+    // The MIDI input thread has its own queue so controller latency does not depend on the UI thread.
+    bool postFromMidiThread (const Command& c) noexcept { return midiCommands_.push (c); }
     bool deckCommand (Cmd type, int deck, int index = 0, double value = 0.0, bool flag = false) noexcept
     {
         Command c; c.type = type; c.deck = deck; c.index = index; c.value = value; c.flag = flag;
@@ -166,6 +168,7 @@ private:
     std::vector<float> masterL_, masterR_, cueL_, cueR_, smpL_, smpR_;
 
     SpscFifo<Command> commands_ { 2048 };
+    SpscFifo<Command> midiCommands_ { 2048 };
     SpscFifo<DeckEvent> events_ { 1024 };
     SpscFifo<Effect*> retiredFx_ { 256 };
 

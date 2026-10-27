@@ -32,7 +32,10 @@ add_library(deejay_engine STATIC
     engine/dj/Recorder.cpp
     engine/dj/Engine.cpp
     engine/dj/analysis/Analysis.cpp
-    engine/dj/analysis/StemSeparator.cpp)
+    engine/dj/analysis/StemSeparator.cpp
+    engine/dj/library/Tags.cpp
+    engine/dj/library/Library.cpp
+    engine/dj/midi/Flx10.cpp)
 target_include_directories(deejay_engine PUBLIC engine)
 target_compile_features(deejay_engine PUBLIC cxx_std_20)
 find_package(Threads REQUIRED)
@@ -52,7 +55,7 @@ endif()
 # ---------------------------------------------------------------------------------------------
 if(DEEJAY_BUILD_TESTS)
     enable_testing()
-    add_executable(deejay_tests tests/EngineTests.cpp tests/AnalysisTests.cpp)
+    add_executable(deejay_tests tests/EngineTests.cpp tests/AnalysisTests.cpp tests/LibraryTests.cpp tests/ControllerTests.cpp)
     target_link_libraries(deejay_tests PRIVATE deejay_engine)
     add_test(NAME engine COMMAND deejay_tests)
 endif()
