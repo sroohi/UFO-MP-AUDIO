@@ -29,13 +29,14 @@ class MixerView : public juce::Component
 public:
     explicit MixerView (AppModel& model);
     void refresh();
-    void setFourDecks (bool four);
+    // the channel strips shown, left to right (FLX10 order: 3 1 2 4, or 7 5 6 8 on the second bank)
+    void setStrips (const std::vector<int>& order);
     void resized() override;
     void paint (juce::Graphics& g) override;
     std::function<void()> onRecordToggled;
 private:
     AppModel& model_;
-    bool four_ = true;
+    std::vector<int> order_ { 2, 0, 1, 3 };
     std::array<std::unique_ptr<ChannelStrip>, dj::kNumDecks> strips_;
     std::array<juce::TextButton, dj::kNumColorFx> cfx_;
     juce::Slider crossfader_;

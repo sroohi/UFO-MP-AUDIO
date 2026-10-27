@@ -1,4 +1,5 @@
-// Sampler panel: banks A-D, 8 slots with Trigger / Hold / On-Off, sync, repeat, volume. Drop tracks on a slot.
+// Sampler panel: banks A-D, 8 slots with Trigger / Hold / On-Off, sync, repeat, volume. Drop library tracks,
+// Splice samples (dragged from the library's Splice list) or audio files from the Finder on a slot.
 #pragma once
 #include "AppModel.h"
 #include "Widgets.h"
@@ -6,7 +7,7 @@
 namespace app
 {
 
-class SamplerSlotView : public juce::Component, public juce::DragAndDropTarget
+class SamplerSlotView : public juce::Component, public juce::DragAndDropTarget, public juce::FileDragAndDropTarget
 {
 public:
     SamplerSlotView (AppModel& model, int index);
@@ -14,8 +15,14 @@ public:
     void refresh();
     void resized() override;
     void paint (juce::Graphics& g) override;
-    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("track:"); }
+    bool isInterestedInDragSource (const SourceDetails& d) override
+    {
+        const auto s = d.description.toString();
+        return s.startsWith ("track:") || s.startsWith ("sample:");
+    }
     void itemDropped (const SourceDetails& d) override;
+    bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
+    void filesDropped (const juce::StringArray& files, int, int) override;
 private:
     int slot() const { return bank_ * dj::kSamplerSlotsPerBank + index_; }
     AppModel& model_;

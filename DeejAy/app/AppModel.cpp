@@ -1,6 +1,7 @@
 #include "AppModel.h"
 #include "AudioHost.h"
 #include "MidiHost.h"
+#include "dj/library/StreamLinks.h"
 
 namespace app
 {
@@ -79,7 +80,10 @@ juce::var AppSettings::toVar() const
     o->setProperty ("hotCueWhenPaused", hotCueWhenPaused); o->setProperty ("brakeSeconds", brakeSeconds); o->setProperty ("startSeconds", startSeconds);
     o->setProperty ("slipReverseAutoCancel", slipReverseAutoCancel); o->setProperty ("jogTicksPerRev", jogTicksPerRev);
     o->setProperty ("quantizeBeats", quantizeBeats); o->setProperty ("phonesMixInHardware", phonesMixInHardware);
-    o->setProperty ("faderStart", faderStart); o->setProperty ("fourDecks", fourDecks); o->setProperty ("eqMode", eqMode);
+    o->setProperty ("faderStart", faderStart); o->setProperty ("deckCount", deckCount); o->setProperty ("deckBank", deckBank);
+    o->setProperty ("eqMode", eqMode); o->setProperty ("keyboardControl", keyboardControl); o->setProperty ("doubleClickCue", doubleClickCue);
+    o->setProperty ("analyseOnImport", analyseOnImport); o->setProperty ("showPerformer", showPerformer); o->setProperty ("showSampler", showSampler);
+    o->setProperty ("spliceFolder", spliceFolder); o->setProperty ("ytDlpPath", ytDlpPath);
     o->setProperty ("xfCurve", xfCurve); o->setProperty ("xfCutLag", xfCutLag); o->setProperty ("chFaderCurve", chFaderCurve);
     return juce::var (o);
 }
@@ -94,7 +98,16 @@ void AppSettings::fromVar (const juce::var& v)
     brakeSeconds = (float) get ("brakeSeconds", (double) brakeSeconds); startSeconds = (float) get ("startSeconds", (double) startSeconds);
     slipReverseAutoCancel = get ("slipReverseAutoCancel", slipReverseAutoCancel); jogTicksPerRev = get ("jogTicksPerRev", jogTicksPerRev);
     quantizeBeats = get ("quantizeBeats", quantizeBeats); phonesMixInHardware = get ("phonesMixInHardware", phonesMixInHardware);
-    faderStart = get ("faderStart", faderStart); fourDecks = get ("fourDecks", fourDecks); eqMode = get ("eqMode", eqMode);
+    faderStart = get ("faderStart", faderStart); eqMode = get ("eqMode", eqMode);
+    if (v.hasProperty ("fourDecks")) deckCount = (bool) v["fourDecks"] ? 4 : 2;   // settings from 0.1
+    deckCount = get ("deckCount", deckCount);
+    if (deckCount != 2 && deckCount != 8) deckCount = 4;
+    deckBank = juce::jlimit (0, 1, (int) get ("deckBank", deckBank));
+    keyboardControl = get ("keyboardControl", keyboardControl); doubleClickCue = get ("doubleClickCue", doubleClickCue);
+    analyseOnImport = get ("analyseOnImport", analyseOnImport);
+    showPerformer = get ("showPerformer", showPerformer); showSampler = get ("showSampler", showSampler);
+    spliceFolder = v.hasProperty ("spliceFolder") ? v["spliceFolder"].toString() : spliceFolder;
+    ytDlpPath = v.hasProperty ("ytDlpPath") ? v["ytDlpPath"].toString() : ytDlpPath;
     xfCurve = (float) get ("xfCurve", (double) xfCurve); xfCutLag = (float) get ("xfCutLag", (double) xfCutLag);
     chFaderCurve = (float) get ("chFaderCurve", (double) chFaderCurve);
 }
@@ -114,6 +127,13 @@ juce::File AppModel::dataDir()
 juce::File AppModel::recordingsDir()
 {
     auto d = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("DEEJ-AY Recordings");
+    d.createDirectory();
+    return d;
+}
+
+juce::File AppModel::downloadsDir()
+{
+    auto d = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("DEEJ-AY Downloads");
     d.createDirectory();
     return d;
 }
@@ -139,6 +159,13 @@ AppModel::~AppModel()
 {
     stopTimer();
     alive_->store (false);
+    {
+        // a running download blocks its worker in a pipe read: ending the process releases it
+        const std::lock_guard<std::mutex> lock (procMutex_);
+        for (auto* p : procs_) p->kill();
+    }
+    linkPool_.removeAllJobs (true, 4000);
+    analysePool_.removeAllJobs (true, 8000);
     pool_.removeAllJobs (true, 8000);
     stopRecording();
     midi.reset();
@@ -181,7 +208,12 @@ void AppModel::applySettings()
     q.type = dj::Cmd::QuantizeBeats;
     q.value = settings.quantizeBeats;
     engine.post (q);
-    if (midi != nullptr) midi->flx10().faderStart.store (settings.faderStart);
+    if (midi != nullptr)
+    {
+        midi->flx10().faderStart.store (settings.faderStart);
+        midi->flx10().setDeckLayer (settings.deckCount == 8 ? settings.deckBank : 0);
+    }
+    if (onLayoutChanged) onLayoutChanged();
     for (int d = 0; d < dj::kNumDecks; ++d)
         engine.mixer.ch[(std::size_t) d].autoGainDb.store (settings.autoGain && decks[(std::size_t) d].trackId != 0 && library.find (decks[(std::size_t) d].trackId) != nullptr
                                                                ? (float) library.find (decks[(std::size_t) d].trackId)->autoGainDb : 0.0f);
@@ -216,9 +248,11 @@ void AppModel::importPaths (const juce::StringArray& paths)
     });
 }
 
-void AppModel::addImported (std::vector<std::pair<juce::String, dj::library::TagInfo>> items, std::vector<double> rates, std::vector<double> lengths)
+void AppModel::addImported (std::vector<std::pair<juce::String, dj::library::TagInfo>> items, std::vector<double> rates, std::vector<double> lengths,
+                            bool analyse)
 {
     const auto now = nowSeconds();
+    std::vector<std::uint64_t> fresh;
     for (std::size_t i = 0; i < items.size(); ++i)
     {
         const auto& [path, tags] = items[i];
@@ -228,10 +262,69 @@ void AppModel::addImported (std::vector<std::pair<juce::String, dj::library::Tag
         bool hasCues = false;
         for (const auto& c : t.hotCues) hasCues = hasCues || c.pos >= 0.0;
         if (! hasCues) dj::library::Library::applySeratoPrep (t, tags, rates[i]);
+        if (! t.analysed) fresh.push_back (t.id);
     }
     markLibraryDirty();
     if (onLibraryChanged) onLibraryChanged();
     if (onStatus) onStatus ("Imported " + juce::String ((int) items.size()) + " tracks");
+    if (analyse && settings.analyseOnImport) analyseInBackground (fresh);
+}
+
+void AppModel::applyAnalysis (dj::library::Track& t, const dj::analysis::TrackAnalysis& an, double sampleRate, double lengthSeconds)
+{
+    // a grid the DJ edited or imported from Serato wins over the analysis; so does a key from the tags
+    if (! t.gridLocked && an.beat.bpm > 0.0) { t.bpm = an.beat.bpm; t.gridAnchor = an.beat.anchor; }
+    if (t.key < 0) t.key = an.key;
+    t.loudnessLufs = an.loudnessLufs;
+    t.autoGainDb = an.autoGainDb;
+    t.sampleRate = sampleRate;
+    t.lengthSeconds = lengthSeconds;
+    t.analysed = true;
+    markLibraryDirty();
+}
+
+void AppModel::analyseInBackground (const std::vector<std::uint64_t>& ids)
+{
+    dj::analysis::AnalysisSettings as;
+    as.minBpm = settings.minBpm; as.maxBpm = settings.maxBpm; as.targetLufs = settings.targetLufs;
+    for (const auto id : ids)
+    {
+        const auto* t = library.find (id);
+        if (t == nullptr) continue;
+        ++analysisPending_;
+        const juce::File file (t->path);
+        analysePool_.addJob ([this, alive = alive_, id, file, as]
+        {
+            if (! alive->load()) return;
+            auto audioData = decode (file);
+            auto an = std::make_shared<dj::analysis::TrackAnalysis>();
+            double sr = 0.0, len = 0.0;
+            if (audioData != nullptr)
+            {
+                *an = dj::analysis::analyseTrack (*audioData, as);
+                saveWaveforms (id, an->overview, an->detail);
+                sr = audioData->sampleRate;
+                len = audioData->lengthSeconds();
+            }
+            juce::MessageManager::callAsync ([this, alive, id, an, sr, len]
+            {
+                if (! alive->load()) return;
+                --analysisPending_;
+                if (auto* tr = library.find (id); tr != nullptr && sr > 0.0) applyAnalysis (*tr, *an, sr, len);
+                if (onTracksUpdated) onTracksUpdated();
+                if (analysisPending_ == 0 && onStatus) onStatus ("Analysis finished");
+            });
+        });
+    }
+    if (analysisPending_ > 0 && onStatus) onStatus ("Analysing " + juce::String (analysisPending_) + " tracks (BPM, key, waveform)...");
+}
+
+void AppModel::analyseUnanalysed()
+{
+    std::vector<std::uint64_t> ids;
+    for (const auto& [id, t] : library.tracks()) if (! t.analysed && ! t.missing) ids.push_back (id);
+    if (ids.empty()) { if (onStatus) onStatus ("Every track is analysed"); return; }
+    analyseInBackground (ids);
 }
 
 void AppModel::importSeratoCrates()
@@ -326,18 +419,7 @@ void AppModel::finishLoad (int deck, int generation, std::uint64_t trackId, std:
         if (onDeckChanged) onDeckChanged (deck);
         return;
     }
-    if (analysed)
-    {
-        // a grid the DJ edited or imported from Serato wins over the analysis
-        if (! t->gridLocked && an.beat.bpm > 0.0) { t->bpm = an.beat.bpm; t->gridAnchor = an.beat.anchor; }
-        if (t->key < 0) t->key = an.key;
-        t->loudnessLufs = an.loudnessLufs;
-        t->autoGainDb = an.autoGainDb;
-        t->sampleRate = audioData->sampleRate;
-        t->lengthSeconds = audioData->lengthSeconds();
-        t->analysed = true;
-        markLibraryDirty();
-    }
+    if (analysed) applyAnalysis (*t, an, audioData->sampleRate, audioData->lengthSeconds());
     dt.overview = std::make_shared<dj::analysis::Waveform> (std::move (an.overview));
     dt.detail = std::make_shared<dj::analysis::Waveform> (std::move (an.detail));
     dt.bpm = t->bpm; dt.key = t->key; dt.lengthSeconds = t->lengthSeconds;
@@ -429,6 +511,271 @@ void AppModel::loadToSampler (int slot, std::uint64_t trackId)
             if (alive->load() && audioData != nullptr) engine.loadSampler (slot, audioData, bpm);
         });
     });
+}
+
+void AppModel::loadSampleFile (int slot, const juce::File& file, double bpm, bool loop, const juce::String& name)
+{
+    if (slot < 0 || slot >= dj::kSamplerSlots) return;
+    samplerNames_[(std::size_t) slot] = name;
+    pool_.addJob ([this, alive = alive_, slot, file, bpm, loop, name]
+    {
+        auto audioData = decode (file);
+        double tempo = bpm;
+        if (audioData != nullptr && loop && tempo <= 0.0) tempo = dj::library::guessLoopBpm (audioData->lengthSeconds());
+        juce::MessageManager::callAsync ([this, alive, slot, audioData, tempo, loop, name]
+        {
+            if (! alive->load()) return;
+            if (audioData == nullptr) { if (onStatus) onStatus ("Could not decode " + name); return; }
+            auto& c = engine.sampler().controls[(std::size_t) slot];
+            c.keylock.store (true);
+            c.quantize.store (true);
+            if (loop)
+            {
+                // a loop follows the master: synced, repeating, started and stopped with the pad
+                c.sync.store (tempo > 0.0);
+                c.repeat.store (true);
+                c.mode.store ((int) dj::SampleMode::OnOff);
+            }
+            else
+            {
+                c.sync.store (false);
+                c.repeat.store (false);
+                c.mode.store ((int) dj::SampleMode::Trigger);
+            }
+            engine.loadSampler (slot, audioData, tempo);
+            const auto slotName = juce::String::charToString ((juce::juce_wchar) ('A' + slot / dj::kSamplerSlotsPerBank)) + juce::String (slot % dj::kSamplerSlotsPerBank + 1);
+            if (onStatus) onStatus ("Sampler " + slotName + ": " + name + (loop ? (tempo > 0.0 ? " (" + juce::String (tempo, 1) + " BPM loop, synced to the master)" : " (loop)") : ""));
+        });
+    });
+}
+
+juce::File AppModel::findTool (const juce::String& name, const juce::String& configured) const
+{
+    if (configured.isNotEmpty() && juce::File (configured).existsAsFile()) return juce::File (configured);
+    // apps started from Finder do not get the shell's PATH, so look in the usual places first
+    const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+    juce::Array<juce::File> candidates { juce::File ("/opt/homebrew/bin").getChildFile (name), juce::File ("/usr/local/bin").getChildFile (name),
+                                         home.getChildFile (".local/bin").getChildFile (name), juce::File ("/usr/bin").getChildFile (name) };
+    for (const auto& dir : juce::StringArray::fromTokens (juce::SystemStats::getEnvironmentVariable ("PATH", {}), ":", {}))
+        if (dir.isNotEmpty()) candidates.add (juce::File (dir).getChildFile (name));
+    for (const auto& f : candidates) if (f.existsAsFile()) return f;
+    return {};
+}
+
+void AppModel::setLinkStatus (int deck, int generation, const juce::String& text)
+{
+    auto& dt = decks[(std::size_t) deck];
+    if (dt.linkGeneration != generation) return;
+    dt.linkStatus = text;
+    if (text.isNotEmpty() && ! text.contains ("downloading") && onStatus) onStatus ("Deck " + juce::String (deck + 1) + ": " + text);
+}
+
+void AppModel::importAndLoad (const juce::File& file, int deck, const juce::String& crate)
+{
+    pool_.addJob ([this, alive = alive_, file, deck, crate]
+    {
+        auto s = std::make_shared<Scanned> (scan ({ file }));
+        juce::MessageManager::callAsync ([this, alive, s, file, deck, crate]
+        {
+            if (! alive->load()) return;
+            addImported (std::move (s->items), std::move (s->rates), std::move (s->lengths), false);   // loading analyses it
+            auto* t = library.findByPath (file.getFullPathName().toStdString());
+            if (t == nullptr) { if (onStatus) onStatus ("Could not read " + file.getFileName()); return; }
+            if (crate == "Downloads")
+            {
+                // yt-dlp names files "Uploader - Title [id]"; without tags the tag reader's name fallback is raw
+                std::string artist, title;
+                dj::library::splitDownloadName (file.getFileName().toStdString(), artist, title);
+                if (! title.empty()) { t->title = title; t->artist = artist; }
+            }
+            if (crate.isNotEmpty())
+            {
+                library.crate (crate.toStdString());
+                library.addToCrate (crate.toStdString(), t->id);
+            }
+            markLibraryDirty();
+            if (onLibraryChanged) onLibraryChanged();
+            loadTrack (deck, t->id);
+        });
+    });
+}
+
+void AppModel::loadFromLink (int deck, const juce::String& text)
+{
+    using namespace dj::library;
+    if (deck < 0 || deck >= dj::kNumDecks) return;
+    auto& dt = decks[(std::size_t) deck];
+    const int generation = ++dt.linkGeneration;
+    const auto link = classifyLink (text.toStdString());
+    if (link.service == LinkService::Unknown)
+    {
+        const juce::File f (text.trim().unquoted());
+        if (juce::File::isAbsolutePath (text.trim().unquoted()) && f.existsAsFile()) { setLinkStatus (deck, generation, {}); importAndLoad (f, deck, {}); return; }
+        setLinkStatus (deck, generation, "Paste a YouTube, SoundCloud or Spotify track link");
+        return;
+    }
+    const juce::String service = serviceName (link.service);
+    if (! link.isTrack) { setLinkStatus (deck, generation, "That " + service + " link is not a single track"); return; }
+    if (engine.deck (deck).view.playing.load()) { setLinkStatus (deck, generation, "Deck " + juce::String (deck + 1) + " is playing"); return; }
+
+    if (link.service == LinkService::Spotify)
+    {
+        // Spotify audio is DRM-protected and its terms forbid DJ use: find the user's own copy instead
+        setLinkStatus (deck, generation, "Looking up the Spotify track...");
+        linkPool_.addJob ([this, alive = alive_, deck, generation, url = link.url]
+        {
+            juce::String body;
+            if (auto in = juce::URL (juce::String (spotifyOEmbedUrl (url))).createInputStream (
+                    juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress).withConnectionTimeoutMs (8000)))
+                body = in->readEntireStreamAsString();
+            juce::MessageManager::callAsync ([this, alive, deck, generation, body]
+            {
+                if (! alive->load()) return;
+                std::string title, author;
+                if (! parseOEmbed (body.toStdString(), title, author))
+                {
+                    setLinkStatus (deck, generation, "Could not read the Spotify link (offline?)");
+                    return;
+                }
+                const auto id = findTrackByTitle (library, title, author);
+                if (id == 0)
+                {
+                    setLinkStatus (deck, generation, "\"" + juce::String (title) + "\" is not in your library. Spotify audio is DRM-protected and cannot be mixed: add your own copy.");
+                    return;
+                }
+                setLinkStatus (deck, generation, "Spotify: loaded your copy of \"" + juce::String (title) + "\"");
+                loadTrack (deck, id);
+            });
+        });
+        return;
+    }
+
+    const auto ytdlp = findTool ("yt-dlp", settings.ytDlpPath);
+    if (! ytdlp.existsAsFile())
+    {
+        setLinkStatus (deck, generation, "yt-dlp not found: install it (brew install yt-dlp) or set its path in Settings > Library & Analysis");
+        return;
+    }
+    const auto ffmpeg = findTool ("ffmpeg", {});
+    const auto outTemplate = downloadsDir().getChildFile ("%(uploader)s - %(title)s [%(id)s].%(ext)s").getFullPathName();
+    auto args = ytDlpArguments (link.url, outTemplate.toStdString(), ffmpeg.existsAsFile());
+    if (ffmpeg.existsAsFile()) args.insert (args.begin(), { "--ffmpeg-location", ffmpeg.getFullPathName().toStdString() });
+    juce::StringArray command { ytdlp.getFullPathName() };
+    for (const auto& a : args) command.add (juce::String (a));
+    setLinkStatus (deck, generation, service + ": starting...");
+
+    linkPool_.addJob ([this, alive = alive_, deck, generation, command, service]
+    {
+        juce::ChildProcess process;
+        if (! process.start (command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+        {
+            juce::MessageManager::callAsync ([this, alive, deck, generation] { if (alive->load()) setLinkStatus (deck, generation, "Could not start yt-dlp"); });
+            return;
+        }
+        {
+            const std::lock_guard<std::mutex> lock (procMutex_);
+            procs_.push_back (&process);
+        }
+        juce::String file, lastError, line;
+        int lastPercent = -1;
+        auto handleLine = [&] (const juce::String& l)
+        {
+            const auto out = l.trim();
+            if (out.isEmpty()) return;
+            if (const auto pct = dj::library::parseYtDlpProgress (out.toStdString()))
+            {
+                const int p = (int) *pct;
+                if (p != lastPercent)
+                {
+                    lastPercent = p;
+                    juce::MessageManager::callAsync ([this, alive, deck, generation, service, p]
+                    { if (alive->load()) setLinkStatus (deck, generation, service + ": downloading " + juce::String (p) + "%"); });
+                }
+            }
+            else if (out.startsWith ("ERROR:")) lastError = out.fromFirstOccurrenceOf ("ERROR:", false, false).trim();
+            else if (juce::File::isAbsolutePath (out) && juce::File (out).existsAsFile()) file = out;
+        };
+        char buffer[1024];
+        for (;;)
+        {
+            const int n = process.readProcessOutput (buffer, (int) sizeof (buffer));
+            if (n <= 0) break;
+            for (int i = 0; i < n; ++i)
+            {
+                if (buffer[i] == '\n' || buffer[i] == '\r') { handleLine (line); line.clear(); }
+                else line += juce::String::charToString ((juce::juce_wchar) (unsigned char) buffer[i]);
+            }
+        }
+        handleLine (line);
+        process.waitForProcessToFinish (5000);
+        {
+            const std::lock_guard<std::mutex> lock (procMutex_);
+            procs_.erase (std::remove (procs_.begin(), procs_.end(), &process), procs_.end());
+        }
+        juce::MessageManager::callAsync ([this, alive, deck, generation, service, file, lastError]
+        {
+            if (! alive->load()) return;
+            if (file.isEmpty())
+            {
+                setLinkStatus (deck, generation, service + ": " + (lastError.isNotEmpty() ? lastError : juce::String ("download failed")));
+                return;
+            }
+            if (decks[(std::size_t) deck].linkGeneration != generation) return;    // another link replaced it
+            setLinkStatus (deck, generation, service + ": loading " + juce::File (file).getFileNameWithoutExtension());
+            importAndLoad (juce::File (file), deck, "Downloads");
+        });
+    });
+}
+
+// ----------------------------------------------------------------------------- Splice
+juce::File AppModel::spliceFolder() const
+{
+    if (settings.spliceFolder.isNotEmpty()) return juce::File (settings.spliceFolder);
+    const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getFullPathName().toStdString();
+    for (const auto& p : dj::library::defaultSpliceFolders (home))
+        if (juce::File (juce::String (p)).isDirectory()) return juce::File (juce::String (p));
+    return {};
+}
+
+void AppModel::rescanSplice()
+{
+    if (spliceBusy_) return;
+    const auto root = spliceFolder();
+    if (! root.isDirectory())
+    {
+        splice_.clear();
+        if (onSpliceChanged) onSpliceChanged();
+        return;
+    }
+    spliceBusy_ = true;
+    pool_.addJob ([this, alive = alive_, root]
+    {
+        auto found = std::make_shared<std::vector<SpliceSample>>();
+        for (const auto& f : root.findChildFiles (juce::File::findFiles, true, "*.wav;*.aif;*.aiff;*.mp3;*.flac;*.ogg;*.m4a"))
+        {
+            if (! alive->load()) return;
+            const auto rel = f.getRelativePathFrom (root).replaceCharacter ('\\', '/');
+            found->push_back ({ f, dj::library::parseSampleName (rel.toStdString()), f.getLastModificationTime() });
+        }
+        // newest downloads first, like the Splice app
+        std::sort (found->begin(), found->end(), [] (const SpliceSample& a, const SpliceSample& b) { return a.modified > b.modified; });
+        juce::MessageManager::callAsync ([this, alive, found]
+        {
+            if (! alive->load()) return;
+            splice_ = std::move (*found);
+            spliceBusy_ = false;
+            if (onSpliceChanged) onSpliceChanged();
+        });
+    });
+}
+
+// ------------------------------------------------------------------------------ banks
+void AppModel::setDeckBank (int bank)
+{
+    settings.deckBank = juce::jlimit (0, dj::kNumDecks / 4 - 1, bank);
+    if (midi != nullptr) midi->flx10().setDeckLayer (settings.deckCount == 8 ? settings.deckBank : 0);
+    saveSettings();
+    if (onLayoutChanged) onLayoutChanged();
 }
 
 void AppModel::instantDoubles (int toDeck, int partMask)

@@ -5,6 +5,14 @@ come from AlphaTheta's published "List of MIDI Messages". This file lists what D
 control. It is not a copy of the manual. The code is `engine/dj/midi/Flx10.cpp`, and the tests in
 `tests/ControllerTests.cpp` pin the behaviour.
 
+## Deck layer (8 decks)
+DEEJ-AY has eight decks; the FLX10 has four deck channels.
+- **Layer 0** maps the hardware decks to decks 1-4. **Layer 1** maps them to decks 5-8.
+- The layer follows the bank on screen. Switch it with SHIFT + VIEW or the DECKS 1-4 / 5-8 button.
+- Everything per deck moves with the layer: transport, jogs, pads, faders, EQ, COLOR knobs, LOAD buttons,
+  Part Instant Doubles and BEAT FX CH SELECT 1-4.
+- LEDs and the On Jog Displays show the decks of the active layer, on the same MIDI channels.
+
 ## Conventions
 - **Deck controls** are on MIDI channels 1–4, one per deck.
 - **The effects section** is on channel 5.
@@ -51,7 +59,7 @@ PAGE < / > (notes 0x24–0x33, and SHIFT variants) work per mode:
 | Control | Note / CC | Action |
 |---|---|---|
 | PLAY/PAUSE | note 0x0B | play / pause (SHIFT 0x47: stutter from the cue) |
-| CUE | note 0x0C | CDJ cue (hold to preview, release returns); SHIFT 0x48: jump to start |
+| CUE | note 0x0C | CDJ cue (hold to preview, release returns); SHIFT 0x48: jump to start. The on-screen double-click restart is deliberately not on the hardware CUE, so cue tapping keeps working |
 | Jog touch | note 0x36 | scratch while touched with VINYL on |
 | Jog top / side | CC 0x22 / 0x23 / 0x21 | scratch (Vinyl, touched) or pitch bend |
 | SHIFT + jog | CC 0x1F | fast search |
@@ -84,7 +92,7 @@ PAGE < / > (notes 0x24–0x33, and SHIFT variants) work per mode:
 | Rotary | CC 0x40 (SHIFT 0x64) | browse (SHIFT: waveform zoom) |
 | LOAD 1–4 | note 0x46–0x49 | load the selected track; press twice within 0.45 s = Instant Doubles |
 | BACK | note 0x65 (SHIFT 0x66) | toggle crates / tracks (SHIFT: add to Prepare) |
-| VIEW | note 0x7A (SHIFT 0x68) | toggle 2 / 4 decks (both) |
+| VIEW | note 0x7A (SHIFT 0x68) | 2 / 4 / 8 decks (SHIFT: decks 1-4 / 5-8 and the deck layer) |
 | MASTER CUE | note 0x63 | |
 | SAMPLER CUE | note 0x69 | |
 | SOUND COLOR FX | notes 0x00–0x05 | SPACE, DUB ECHO, CRUSH, PITCH, NOISE, FILTER; pressing the lit one turns it off |
@@ -100,7 +108,7 @@ PAGE < / > (notes 0x24–0x33, and SHIFT variants) work per mode:
 | Control | Note / CC | Action |
 |---|---|---|
 | BEAT FX SELECT | notes 0x20–0x2D | LOW CUT ECHO, ECHO, MULTI TAP DELAY, SPIRAL, REVERB, TRANS, ENIGMA JET, FLANGER, PHASER, STRETCH, SLIP ROLL, ROLL, MOBIUS (SAW), MOBIUS (TRIANGLE) |
-| BEAT FX CH SELECT | notes 0x10–0x16 | CH1–CH4, MASTER, (0x15 unused), SAMPLER |
+| BEAT FX CH SELECT | notes 0x10–0x16 | CH1–CH4 of the deck layer (CH5–CH8 on layer 1), MASTER, (0x15 unused), SAMPLER |
 | BEAT < / > | notes 0x4A / 0x4B | step through the effect's beat range (1/16–16, 1/16–64, ±1/16–±64, or reverb size) |
 | SHIFT + BEAT < | note 0x66 | BPM AUTO |
 | SHIFT + BEAT > | note 0x6B | tap BPM (3+ taps) |

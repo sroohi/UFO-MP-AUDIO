@@ -15,6 +15,7 @@ public:
     void paint (juce::Graphics& g) override;
 private:
     void stepBeats (int dir);
+    int target (int button) const;            // assign button -> FX target (channel buttons follow the deck bank)
     AppModel& model_;
     int unit_;
     juce::TextButton mode_;

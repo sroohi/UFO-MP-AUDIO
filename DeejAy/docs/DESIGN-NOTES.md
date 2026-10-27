@@ -1,8 +1,13 @@
 # DEEJ-AY design notes
 
-DEEJ-AY targets the DDJ-FLX10's Serato DJ Pro feature set and workflow: four decks, a 4-channel mixer, two
-Serato FX units plus the FLX10 BEAT FX unit, a 32-slot sampler, stems, and twelve pad modes. These notes
-cover how each piece works and why.
+DEEJ-AY targets the DDJ-FLX10's Serato DJ Pro feature set and workflow, then goes further. It has:
+- eight decks and an 8-channel mixer (four on screen per bank);
+- two Serato FX units plus the FLX10 BEAT FX unit;
+- the Performer, master-bus performance FX;
+- a 32-slot BPM-matching sampler fed from the library or Splice;
+- stems and twelve pad modes.
+
+These notes cover how each piece works and why.
 
 ## Layout
 ```
@@ -12,10 +17,12 @@ engine/dj/            real-time core (C++20, no JUCE, builds and tests on Linux)
   TimeStretch         WSOLA key lock / key shift / Pitch Play
   Mixer, ColorFx      channel strips, EQ / isolator / Part ISO, Sound Color FX, crossfader, cue, limiter
   Effects, FxUnit     the effect library and the Serato-style FX units
-  Sampler, Recorder   4 banks × 8 slots; master recording tap
+  Sampler, Recorder   4 banks × 8 slots (key-locked sync, beat-quantized launch); master recording tap
+  Performer           master-bus performance FX (stutter ... reverb)
   dsp/                biquads (RBJ, LR4), SVF, Freeverb, compressor
   analysis/           FFT, BPM + beatgrid, key, loudness, colour waveform, DSP stem separation
-  library/            JSON database, crates, smart crates, history, tag reader with Serato prep import
+  library/            JSON database, crates, smart crates, history, tag reader with Serato prep import,
+                      sample-pack names (Splice), link handling (YouTube / SoundCloud / Spotify)
   midi/               DDJ-FLX10 mapping (input, LEDs, jog displays)
 app/                  JUCE 9 application (audio/MIDI hosting, UI, settings, file decoding)
 tests/                engine, analysis, library and controller tests (no framework, `deejay_tests`)
@@ -147,6 +154,50 @@ waveforms go in `Analysis/<id>.djwf`.
     track's grid.
   - Serato `.crate` files can be imported.
   - Re-importing a track only fills fields that are present, so it never wipes existing data.
+
+## Eight decks and banks
+- The engine always runs eight decks and eight channel strips. A deck that is not playing costs almost
+  nothing.
+- The UI shows 2, 4 or 8 decks. With 8, the deck panels and mixer strips show one bank of four (1-4 or 5-8)
+  in FLX10 order, while all eight waveform lanes stay visible.
+- The FLX10's deck layer follows the bank. The keyboard plays the left and right deck of the bank.
+
+## Performer (master-bus performance FX)
+- **Position:** after the master FX unit, before master level, limiter, outputs and recorder. Everything the
+  decks and the sampler play goes through it, and the recording captures it.
+- **Clock:** the clock deck is the sync leader while it plays, otherwise the loudest playing deck with a grid.
+  Its tempo and beat drive every rhythmic value. Without one, an internal clock keeps time.
+- **Time effects** share a 12-second input ring; one plays at a time (tape stop > stutter > note repeat).
+  - Stutter repeats the grid slice that contains the press, starting from where the music is, so the switch
+    is seamless. Build-up halves the slice every 1-8 beats.
+  - Note repeat re-captures the start of every beat, with a gate.
+  - Tape stop reads the ring at a falling rate (linear to hard brake); a stopped tape is silent.
+- **Pitch:** a two-tap delay-line shifter with Hann crossfades, 45 ms window.
+- **Filter:** SVF low-pass / high-pass around an open centre.
+- **Talkbox:** three formant band-passes morphing A-E-I-O-U, fed by a soft-clipped signal for harmonics,
+  with an optional beat-locked vowel sweep.
+- **Bitcrusher:** bit depth and sample-and-hold.
+- **Delay:** ping-pong with a damped feedback path.
+- **Reverb:** Freeverb as a send.
+- Every switch crossfades over 10 ms. Delay and reverb tails ring out after switching off.
+
+## Sampler sync
+- SYNC with key lock (the default) time-stretches with the same WSOLA as the decks, so a loop matches the
+  master tempo at its own pitch. Without key lock it varispeeds.
+- A synced slot launches on the next master beat. The stretcher is primed one hop ahead, so the first
+  transient plays at full level instead of fading in.
+- A repeating synced loop wraps at the nearest whole number of beats when the file is within 0.15 beat of
+  one, so it cannot drift against the master.
+- A loop's BPM comes from its name (Splice and most packs) or, failing that, from its length: the whole-beat
+  count that gives an integer tempo in the 85-175 BPM range.
+
+## Links
+- **YouTube / SoundCloud:** a child process runs the user's yt-dlp, reading its progress lines (`--newline
+  --progress`) and the final path (`--print after_move:filepath`). It asks for M4A through ffmpeg when
+  available, else an M4A or MP3 stream.
+- **Spotify:** the oEmbed title, then a normalised title / artist match against the library.
+- The downloads, the analysis queue and the Splice scan each run on their own worker pool, so none of them
+  delays loading a deck.
 
 ## Known gaps
 See `ROADMAP.md`.

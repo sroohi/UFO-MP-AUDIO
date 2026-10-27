@@ -19,8 +19,10 @@ inline const juce::Colour bad      { 0xffff3b47 };
 
 inline juce::Colour deck (int i)
 {
-    static const juce::Colour c[4] { juce::Colour (0xff3fa9f5), juce::Colour (0xffff8a1f), juce::Colour (0xff8ce04a), juce::Colour (0xffe64acb) };
-    return c[(std::size_t) juce::jlimit (0, 3, i)];
+    static const juce::Colour c[dj::kNumDecks] {
+        juce::Colour (0xff3fa9f5), juce::Colour (0xffff8a1f), juce::Colour (0xff8ce04a), juce::Colour (0xffe64acb),
+        juce::Colour (0xff27d7c4), juce::Colour (0xfff5d33f), juce::Colour (0xff9d7bff), juce::Colour (0xffff5b6e) };
+    return c[(std::size_t) juce::jlimit (0, dj::kNumDecks - 1, i)];
 }
 
 // Default hot cue colours (pads 1-8); a stored track colour (0xRRGGBB) wins when set.

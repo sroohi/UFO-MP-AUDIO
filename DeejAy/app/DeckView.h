@@ -36,7 +36,11 @@ public:
     void resized() override;
 
     // library rows are dragged in as "track:<id>"
-    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("track:"); }
+    bool isInterestedInDragSource (const SourceDetails& d) override
+    {
+        const auto s = d.description.toString();
+        return s.startsWith ("track:") || s.startsWith ("sample:");
+    }
     void itemDropped (const SourceDetails& d) override;
     bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
     void filesDropped (const juce::StringArray& files, int, int) override;
@@ -44,6 +48,11 @@ public:
     // pad dispatch (also used by the keyboard)
     void padDown (int pad, bool shift);
     void padUp (int pad);
+
+    // Clicking a pad or button must not hand keyboard focus to the URL box (JUCE gives it to a panel's
+    // first focusable child): without a traverser the click passes focus up to the main window, which
+    // keeps the computer-keyboard controls working. The URL box still takes focus when clicked itself.
+    std::unique_ptr<juce::ComponentTraverser> createKeyboardFocusTraverser() override { return nullptr; }
 
 private:
     void cmd (dj::Cmd type, int index = 0, double value = 0.0, bool flag = false) { model_.engine.deckCommand (type, deck_, index, value, flag); }
@@ -63,8 +72,13 @@ private:
     juce::Slider tempo_;
     juce::ComboBox padMode_;
     std::array<PadButton, 8> pads_;
+    juce::TextEditor url_;                // paste a YouTube / SoundCloud / Spotify link
+    juce::TextButton urlGo_ { "LOAD" };
+    juce::String linkStatus_;
+    juce::uint32 lastCueClick_ = 0;
     double autoLoopBeats_ = 4.0, jumpBeats_ = 4.0;
     juce::String bpmText_, keyText_, timeText_, tempoText_;
+    int soundingKey_ = -1;
 };
 
 } // namespace app

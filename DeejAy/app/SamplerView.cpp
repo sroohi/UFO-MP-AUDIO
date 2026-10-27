@@ -16,7 +16,14 @@ SamplerSlotView::SamplerSlotView (AppModel& model, int index) : model_ (model), 
     mode_.onClick = [this] { auto& m = model_.engine.sampler().controls[(std::size_t) slot()].mode; m.store ((m.load() + 1) % 3); };
     mode_.setTooltip ("Play mode: Trigger (plays through, re-press restarts) / Hold (plays while held) / On-Off (press again to stop)");
     styleToggle (sync_, Theme::accent);
-    sync_.onClick = [this] { auto& s = model_.engine.sampler().controls[(std::size_t) slot()].sync; s.store (! s.load()); };
+    sync_.onClick = [this]
+    {
+        auto& c = model_.engine.sampler().controls[(std::size_t) slot()];
+        if (juce::ModifierKeys::currentModifiers.isShiftDown()) c.keylock.store (! c.keylock.load());
+        else c.sync.store (! c.sync.load());
+    };
+    sync_.setTooltip ("SYNC: match the master tempo and start on the beat. SHIFT-click: key lock on / off "
+                      "(off = the sample speeds up like a record, SYNC~)");
     styleToggle (repeat_, Theme::accent);
     repeat_.onClick = [this] { auto& s = model_.engine.sampler().controls[(std::size_t) slot()].repeat; s.store (! s.load()); };
     for (auto* b : { &mode_, &sync_, &repeat_ }) addAndMakeVisible (b);
@@ -36,12 +43,17 @@ void SamplerSlotView::refresh()
     static const char* modes[3] { "TRIG", "HOLD", "ON/OFF" };
     mode_.setButtonText (modes[juce::jlimit (0, 2, c.mode.load())]);
     sync_.setToggleState (c.sync.load(), juce::dontSendNotification);
+    sync_.setButtonText (c.keylock.load() ? "SYNC" : "SYNC~");
     repeat_.setToggleState (c.repeat.load(), juce::dontSendNotification);
     if (! volume_.isMouseButtonDown()) volume_.setValue (c.volume.load(), juce::dontSendNotification);
     const auto name = model_.samplerName (slot());
-    play_.setLabel (name.isNotEmpty() ? name : juce::String::charToString ((juce::juce_wchar) ('A' + bank_)) + juce::String (index_ + 1));
+    const double bpm = v.bpm.load();
+    play_.setLabel ((name.isNotEmpty() ? name : juce::String::charToString ((juce::juce_wchar) ('A' + bank_)) + juce::String (index_ + 1))
+                    + (v.loaded.load() && bpm > 0.0 ? "\n" + juce::String (bpm, std::abs (bpm - std::round (bpm)) < 0.05 ? 0 : 1) + " BPM" : juce::String()));
     play_.setLit (v.loaded.load());
-    play_.setColour (v.playing.load() ? Theme::good : Theme::accent);
+    // waiting for the beat: blink
+    const bool blink = v.waiting.load() && (juce::Time::getMillisecondCounter() / 120) % 2 == 0;
+    play_.setColour (v.playing.load() || blink ? Theme::good : Theme::accent);
     repaint();
 }
 
@@ -69,7 +81,23 @@ void SamplerSlotView::resized()
 
 void SamplerSlotView::itemDropped (const SourceDetails& d)
 {
-    model_.loadToSampler (slot(), (std::uint64_t) d.description.toString().fromFirstOccurrenceOf ("track:", false, false).getLargeIntValue());
+    const auto s = d.description.toString();
+    if (s.startsWith ("sample:"))
+    {
+        // "sample:\n<path>\n<bpm>\n<loop 0/1>\n<name>" from the library's Splice list
+        const auto parts = juce::StringArray::fromLines (s.fromFirstOccurrenceOf ("\n", false, false));
+        if (parts.size() >= 4) model_.loadSampleFile (slot(), juce::File (parts[0]), parts[1].getDoubleValue(), parts[2] == "1", parts[3]);
+        return;
+    }
+    model_.loadToSampler (slot(), (std::uint64_t) s.fromFirstOccurrenceOf ("track:", false, false).getLargeIntValue());
+}
+
+void SamplerSlotView::filesDropped (const juce::StringArray& files, int, int)
+{
+    if (files.isEmpty()) return;
+    const juce::File f (files[0]);
+    const auto info = dj::library::parseSampleName (f.getFileName().toStdString());
+    model_.loadSampleFile (slot(), f, info.bpm, info.loop, juce::String (info.name));
 }
 
 SamplerView::SamplerView (AppModel& model) : model_ (model)

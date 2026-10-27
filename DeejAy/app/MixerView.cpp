@@ -149,11 +149,11 @@ MixerView::MixerView (AppModel& model) : model_ (model)
     addAndMakeVisible (masterR_);
 }
 
-void MixerView::setFourDecks (bool four)
+void MixerView::setStrips (const std::vector<int>& order)
 {
-    four_ = four;
-    strips_[2]->setVisible (four);
-    strips_[3]->setVisible (four);
+    order_ = order;
+    for (int c = 0; c < dj::kNumDecks; ++c)
+        strips_[(std::size_t) c]->setVisible (std::find (order_.begin(), order_.end(), c) != order_.end());
     resized();
 }
 
@@ -199,9 +199,8 @@ void MixerView::resized()
     masterL_.setBounds (meters.removeFromLeft (meters.getWidth() / 2).reduced (2, 0));
     masterR_.setBounds (meters.reduced (2, 0));
     // FLX10 channel order 3-1-2-4 in four-deck mode
-    const std::vector<int> order = four_ ? std::vector<int> { 2, 0, 1, 3 } : std::vector<int> { 0, 1 };
-    const int sw = r.getWidth() / (int) order.size();
-    for (int c : order) strips_[(std::size_t) c]->setBounds (r.removeFromLeft (sw));
+    const int sw = r.getWidth() / juce::jmax (1, (int) order_.size());
+    for (int c : order_) strips_[(std::size_t) c]->setBounds (r.removeFromLeft (sw));
 }
 
 } // namespace app

@@ -16,13 +16,21 @@ Ordered by how much a working DJ will notice the gap.
    DSP backend kept as the fallback, and stems cached on disk next to the waveform cache.
 3. **Saved Flip** (Serato Flip): record and replay cue-jump sequences. Hold HOT CUE currently opens Saved
    Loop instead.
-4. **Pad colours from hot-cue colours.** This depends on the palette from item 1.
-5. **Dynamic beatgrids** (multiple grid markers) for live-drummer tracks. Today's grids are constant tempo.
-6. **Real-machine QA on macOS.** CI builds and runs the tests on macOS. The UI has been exercised on Linux
+4. **Splice partner integration.** In-app sign-in and catalogue browsing need Splice's partner API (talk to
+   Splice). Until then DEEJ-AY browses the Splice app's download folder.
+5. **Link loading policy.** Decide with legal counsel how the URL box ships commercially. Today it needs a
+   user-installed yt-dlp and shows a rights notice. SoundCloud's official DJ integration is a partner
+   programme worth applying to. Spotify cannot be supported: DRM, and terms that forbid DJ use.
+6. **Pad colours from hot-cue colours.** This depends on the palette from item 1.
+7. **Dynamic beatgrids** (multiple grid markers) for live-drummer tracks. Today's grids are constant tempo.
+8. **Real-machine QA on macOS.** CI builds and runs the tests on macOS. The UI has been exercised on Linux
    only.
    - Check Core Audio device switching mid-set.
    - Check sleep/wake with the controller plugged in.
    - Check Retina rendering of the waveforms.
+   - Check CPU with eight decks playing.
+9. **Performer polish.** Kaoss-style recall of XY positions per effect, MIDI mapping of the Performer for
+   controllers other than the keyboard, and a granular pitch option for big shifts.
 
 ## After 1.0
 - MIDI learn and mappings for controllers other than the FLX10.

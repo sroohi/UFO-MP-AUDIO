@@ -7,7 +7,7 @@ namespace app
 {
 
 // Momentary-aware button: onPress / onRelease fire on mouse down / up (pads, cue, censor...).
-class PadButton : public juce::Component
+class PadButton : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit PadButton (juce::String label = {}) : label_ (std::move (label)) {}

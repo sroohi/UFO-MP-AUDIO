@@ -79,7 +79,107 @@ LibraryView::LibraryView (AppModel& model) : model_ (model)
     seratoImport_.onClick = [this] { model_.importSeratoCrates(); };
     newCrate_.onClick = [this] { newCrate(); };
     newSmart_.onClick = [this] { newSmartCrate(); };
+
+    for (auto* b : { &analyse_, &spliceOpen_, &spliceFolder_, &spliceRescan_ }) { styleToggle (*b, Theme::accent); addChildComponent (b); }
+    analyse_.setTooltip ("Detect BPM, key and loudness for every track that has not been analysed yet (in the background)");
+    analyse_.onClick = [this] { model_.analyseUnanalysed(); };
+    spliceOpen_.setTooltip ("Sign in and browse in the Splice app: the sounds you download there appear in this list");
+    spliceOpen_.onClick = []
+    {
+        const juce::File app ("/Applications/Splice.app");
+        if (app.exists()) app.startAsProcess();
+        else juce::URL ("https://splice.com/sounds").launchInDefaultBrowser();
+    };
+    spliceFolder_.setTooltip ("The folder the Splice app downloads into (Splice > Preferences > Splice folder)");
+    spliceFolder_.onClick = [this]
+    {
+        chooser_ = std::make_unique<juce::FileChooser> ("Splice sounds folder", model_.spliceFolder().isDirectory() ? model_.spliceFolder() : juce::File::getSpecialLocation (juce::File::userHomeDirectory));
+        chooser_->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories, [this] (const juce::FileChooser& fc)
+        {
+            if (! fc.getResult().isDirectory()) return;
+            model_.settings.spliceFolder = fc.getResult().getFullPathName();
+            model_.saveSettings();
+            model_.rescanSplice();
+        });
+    };
+    spliceRescan_.onClick = [this] { model_.rescanSplice(); };
+    model_.onSpliceChanged = [this] { if (splice()) refreshTracks(); repaint(); };
     rebuild();
+    updateToolbar();
+}
+
+void LibraryView::updateToolbar()
+{
+    const bool s = splice();
+    for (auto* b : { &addFiles_, &addFolder_, &seratoImport_, &newCrate_, &newSmart_, &analyse_ }) b->setVisible (! s);
+    for (auto* b : { &spliceOpen_, &spliceFolder_, &spliceRescan_ }) b->setVisible (s);
+    auto& h = table_.getHeader();
+    h.setColumnName (ColArtist, s ? "Pack" : "Artist");
+    h.setColumnName (ColAlbum, s ? "Type" : "Album");
+    h.setColumnName (ColAdded, s ? "Downloaded" : "Added");
+    resized();
+}
+
+void LibraryView::showSplice()
+{
+    for (int i = 0; i < (int) sources_.size(); ++i)
+        if (sources_[(std::size_t) i].kind == Source::Kind::Splice)
+        {
+            currentSource_ = i;
+            sourceList_.selectRow (i);
+            sortColumn_ = 0;
+            model_.rescanSplice();
+            startTimer (30000);
+            refreshTracks();
+            updateToolbar();
+        }
+}
+
+void LibraryView::timerCallback()
+{
+    if (splice() && isShowing()) model_.rescanSplice();
+    else stopTimer();
+}
+
+const SpliceSample* LibraryView::spliceAt (int row) const
+{
+    if (row < 0 || row >= (int) spliceRows_.size()) return nullptr;
+    const auto& all = model_.spliceSamples();
+    const int i = spliceRows_[(std::size_t) row];
+    return i >= 0 && i < (int) all.size() ? &all[(std::size_t) i] : nullptr;
+}
+
+int LibraryView::freeSamplerSlot() const
+{
+    // first empty slot of the bank on screen, then of any bank, else the bank's first slot
+    const int bank = model_.engine.samplerBank.load();
+    for (int k = 0; k < dj::kSamplerSlots; ++k)
+    {
+        const int s = (bank * dj::kSamplerSlotsPerBank + k) % dj::kSamplerSlots;
+        if (! model_.engine.sampler().view[(std::size_t) s].loaded.load() && model_.samplerName (s).isEmpty()) return s;
+    }
+    return bank * dj::kSamplerSlotsPerBank;
+}
+
+void LibraryView::showSpliceMenu (int row)
+{
+    const auto* s = spliceAt (row);
+    if (s == nullptr) return;
+    const auto sample = *s;
+    juce::PopupMenu m, slots;
+    m.addItem ("Load to the next free sampler slot", [this, sample]
+    {
+        model_.loadSampleFile (freeSamplerSlot(), sample.file, sample.info.bpm, sample.info.loop, juce::String (sample.info.name));
+    });
+    for (int k = 0; k < dj::kSamplerSlots; ++k)
+        slots.addItem (juce::String::charToString ((juce::juce_wchar) ('A' + k / 8)) + juce::String (k % 8 + 1) + (model_.samplerName (k).isNotEmpty() ? "  (" + model_.samplerName (k) + ")" : juce::String()),
+                       [this, k, sample] { model_.loadSampleFile (k, sample.file, sample.info.bpm, sample.info.loop, juce::String (sample.info.name)); });
+    m.addSubMenu ("Load to Sampler", slots);
+    for (int d = 0; d < model_.settings.deckCount; ++d)
+        m.addItem ("Load to Deck " + juce::String (d + 1), [this, d, f = sample.file] { model_.importAndLoad (f, d, "Splice"); });
+    m.addSeparator();
+    m.addItem ("Show in Finder", [f = sample.file] { f.revealToUser(); });
+    m.showMenuAsync (juce::PopupMenu::Options());
 }
 
 LibraryView::~LibraryView() = default;
@@ -90,6 +190,7 @@ void LibraryView::rebuildSources()
     sources_.clear();
     sources_.push_back ({ Source::Kind::All, "All Tracks" });
     sources_.push_back ({ Source::Kind::Prepare, "Prepare" });
+    sources_.push_back ({ Source::Kind::Splice, "Splice" });
     auto& lib = model_.library;
     for (const auto& c : lib.crates())
     {
@@ -129,6 +230,7 @@ std::vector<std::uint64_t> LibraryView::sourceTracks() const
     {
         case Source::Kind::All: return lib.allIds();
         case Source::Kind::Prepare: return const_cast<dj::library::Library&> (lib).prepare();
+        case Source::Kind::Splice: return {};
         case Source::Kind::Crate: return lib.crateTracks (s.name, true);
         case Source::Kind::Smart:
             return lib.evaluate (const_cast<dj::library::Library&> (lib).smartCrates()[(std::size_t) s.index], juce::Time::currentTimeMillis() / 1000);
@@ -144,6 +246,43 @@ std::vector<std::uint64_t> LibraryView::sourceTracks() const
 
 void LibraryView::refreshTracks()
 {
+    if (splice())
+    {
+        // Splice samples: every search word must appear in the name, pack, BPM or key
+        const auto& all = model_.spliceSamples();
+        const auto words = juce::StringArray::fromTokens (search_.getText().toLowerCase(), " ", {});
+        spliceRows_.clear();
+        for (int i = 0; i < (int) all.size(); ++i)
+        {
+            const auto& s = all[(std::size_t) i];
+            const auto hay = (juce::String (s.info.name) + " " + juce::String (s.info.pack) + " " + (s.info.bpm > 0 ? juce::String ((int) s.info.bpm) : juce::String())
+                              + " " + Theme::keyText (s.info.key, model_.settings.camelotKeys) + " " + (s.info.loop ? "loop" : "one shot")).toLowerCase();
+            bool ok = true;
+            for (const auto& w : words) ok = ok && hay.contains (w);
+            if (ok) spliceRows_.push_back (i);
+        }
+        if (sortColumn_ != 0)
+            std::stable_sort (spliceRows_.begin(), spliceRows_.end(), [&] (int a, int b)
+            {
+                const auto& x = all[(std::size_t) a];
+                const auto& y = all[(std::size_t) b];
+                auto three = [] (auto p, auto q) { return p < q ? -1 : q < p ? 1 : 0; };
+                int c;
+                switch (sortColumn_)
+                {
+                    case ColArtist: c = three (x.info.pack, y.info.pack); break;
+                    case ColBpm: c = three (x.info.bpm, y.info.bpm); break;
+                    case ColKey: c = three (x.info.key, y.info.key); break;
+                    case ColAlbum: c = three ((int) x.info.loop, (int) y.info.loop); break;
+                    case ColAdded: c = three (x.modified, y.modified); break;
+                    default: c = juce::String (x.info.name).compareNatural (juce::String (y.info.name)); break;
+                }
+                return sortForwards_ ? c < 0 : c > 0;
+            });
+        table_.updateContent();
+        table_.repaint();
+        return;
+    }
     auto ids = model_.library.search (sourceTracks(), search_.getText().toStdString());
     const auto kind = sources_[(std::size_t) currentSource_].kind;
     // crates, Prepare and History keep their own order until a column is clicked
@@ -178,17 +317,21 @@ void LibraryView::listBoxItemClicked (int row, const juce::MouseEvent& e)
     if (row < 0 || row >= (int) sources_.size()) return;
     currentSource_ = row;
     sortColumn_ = 0;
+    if (splice()) { model_.rescanSplice(); startTimer (30000); }
+    else stopTimer();
     refreshTracks();
+    updateToolbar();
     if (e.mods.isPopupMenu()) showSourceMenu (row);
 }
 
 // ---------------------------------------------------------------------------------- table
-int LibraryView::getNumRows() { return (int) model_.visibleTracks.size(); }
+int LibraryView::getNumRows() { return splice() ? (int) spliceRows_.size() : (int) model_.visibleTracks.size(); }
 
 void LibraryView::paintRowBackground (juce::Graphics& g, int row, int w, int h, bool selected)
 {
     if (selected) g.fillAll (Theme::accent.withAlpha (focusTracks_ ? 0.35f : 0.2f));
     else if (row % 2) g.fillAll (Theme::panel);
+    if (splice()) return;
     // tracks loaded on a deck get that deck's colour bar
     if (row >= 0 && row < (int) model_.visibleTracks.size())
         for (int d = 0; d < dj::kNumDecks; ++d)
@@ -202,6 +345,28 @@ void LibraryView::paintRowBackground (juce::Graphics& g, int row, int w, int h, 
 
 void LibraryView::paintCell (juce::Graphics& g, int row, int column, int w, int h, bool)
 {
+    if (splice())
+    {
+        const auto* s = spliceAt (row);
+        if (s == nullptr) return;
+        juce::String text;
+        auto colour = Theme::text;
+        switch (column)
+        {
+            case ColNum: text = juce::String (row + 1); colour = Theme::dim; break;
+            case ColTitle: text = juce::String::fromUTF8 (s->info.name.c_str()); break;
+            case ColArtist: text = juce::String::fromUTF8 (s->info.pack.c_str()); colour = Theme::dim; break;
+            case ColBpm: text = s->info.bpm > 0 ? juce::String (s->info.bpm, 0) : juce::String(); break;
+            case ColKey: text = s->info.key >= 0 ? Theme::keyText (s->info.key, model_.settings.camelotKeys) : juce::String(); colour = Theme::key (s->info.key); break;
+            case ColAlbum: text = s->info.loop ? "Loop" : "One-shot"; colour = s->info.loop ? Theme::good : Theme::dim; break;
+            case ColAdded: text = s->modified.formatted ("%Y-%m-%d"); colour = Theme::dim; break;
+            default: break;
+        }
+        g.setColour (colour);
+        g.setFont (juce::FontOptions (12.5f));
+        g.drawText (text, 4, 0, w - 6, h, juce::Justification::centredLeft, true);
+        return;
+    }
     if (row < 0 || row >= (int) model_.visibleTracks.size()) return;
     const auto* t = model_.library.find (model_.visibleTracks[(std::size_t) row]);
     if (t == nullptr) return;
@@ -236,22 +401,31 @@ void LibraryView::sortOrderChanged (int columnId, bool forwards)
 
 void LibraryView::selectedRowsChanged (int lastRow)
 {
+    if (splice()) return;
     if (lastRow >= 0 && lastRow < (int) model_.visibleTracks.size()) model_.selectedTrack = model_.visibleTracks[(std::size_t) lastRow];
 }
 
 int LibraryView::idleDeck() const
 {
-    // first empty deck, else the first one that is not playing
-    const int decks = model_.settings.fourDecks ? dj::kNumDecks : 2;
-    for (int d = 0; d < decks; ++d)
+    // first empty deck on screen, else the first one on screen that is not playing
+    const int count = model_.settings.deckCount;
+    const int first = count == 8 ? model_.settings.deckBank * 4 : 0;
+    const int shown = count == 8 ? 4 : count;
+    for (int d = first; d < first + shown; ++d)
         if (model_.decks[(std::size_t) d].trackId == 0) return d;
-    for (int d = 0; d < decks; ++d)
+    for (int d = first; d < first + shown; ++d)
         if (! model_.engine.deck (d).view.playing.load()) return d;
     return -1;
 }
 
 void LibraryView::cellDoubleClicked (int row, int, const juce::MouseEvent&)
 {
+    if (splice())
+    {
+        if (const auto* s = spliceAt (row))
+            model_.loadSampleFile (freeSamplerSlot(), s->file, s->info.bpm, s->info.loop, juce::String (s->info.name));
+        return;
+    }
     if (row < 0 || row >= (int) model_.visibleTracks.size()) return;
     const int d = idleDeck();
     if (d >= 0) model_.loadTrack (d, model_.visibleTracks[(std::size_t) row]);
@@ -260,13 +434,19 @@ void LibraryView::cellDoubleClicked (int row, int, const juce::MouseEvent&)
 void LibraryView::cellClicked (int row, int, const juce::MouseEvent& e)
 {
     focusTracks_ = true;
-    if (e.mods.isPopupMenu()) showTrackMenu (row);
+    if (e.mods.isPopupMenu()) { if (splice()) showSpliceMenu (row); else showTrackMenu (row); }
 }
 
 juce::var LibraryView::getDragSourceDescription (const juce::SparseSet<int>& rows)
 {
     if (rows.isEmpty()) return {};
     const int row = rows[0];
+    if (splice())
+    {
+        const auto* s = spliceAt (row);
+        if (s == nullptr) return {};
+        return "sample:\n" + s->file.getFullPathName() + "\n" + juce::String (s->info.bpm) + "\n" + (s->info.loop ? "1" : "0") + "\n" + juce::String (s->info.name);
+    }
     if (row < 0 || row >= (int) model_.visibleTracks.size()) return {};
     return "track:" + juce::String ((juce::int64) model_.visibleTracks[(std::size_t) row]);
 }
@@ -277,7 +457,7 @@ void LibraryView::showTrackMenu (int row)
     if (row < 0 || row >= (int) model_.visibleTracks.size()) return;
     const auto id = model_.visibleTracks[(std::size_t) row];
     juce::PopupMenu m, crates, sampler;
-    for (int d = 0; d < dj::kNumDecks; ++d) m.addItem ("Load to Deck " + juce::String (d + 1), [this, d, id] { model_.loadTrack (d, id); });
+    for (int d = 0; d < model_.settings.deckCount; ++d) m.addItem ("Load to Deck " + juce::String (d + 1), [this, d, id] { model_.loadTrack (d, id); });
     m.addItem ("Add to Prepare", [this, id] { model_.library.prepare().push_back (id); model_.markLibraryDirty(); rebuild(); });
     for (const auto& c : model_.library.crates())
     {
@@ -291,7 +471,8 @@ void LibraryView::showTrackMenu (int row)
     m.addSeparator();
     m.addItem ("Re-analyse (BPM, key, gain)", [this, id]
     {
-        if (auto* t = model_.library.find (id)) { t->analysed = false; t->gridLocked = false; model_.markLibraryDirty(); }
+        if (auto* t = model_.library.find (id)) { t->analysed = false; t->gridLocked = false; t->key = -1; model_.markLibraryDirty(); }
+        model_.analyseInBackground ({ id });
     });
     const auto& src = sources_[(std::size_t) currentSource_];
     if (src.kind == Source::Kind::Crate)
@@ -431,12 +612,35 @@ void LibraryView::paint (juce::Graphics& g)
     g.fillAll (Theme::bg);
 }
 
+void LibraryView::paintOverChildren (juce::Graphics& g)
+{
+    if (! splice() || ! spliceRows_.empty()) return;
+    // empty Splice list: say how to fill it
+    juce::String msg;
+    if (! model_.spliceFolder().isDirectory())
+        msg = "Splice is not set up on this Mac.\n\nInstall the Splice desktop app and sign in (Open Splice). The sounds you download there land in its "
+              "Splice folder and appear here, ready to drag onto a sampler pad. If you moved the folder, pick it with Splice Folder...";
+    else if (model_.spliceScanning())
+        msg = "Reading " + model_.spliceFolder().getFullPathName() + " ...";
+    else if (search_.getText().isNotEmpty())
+        msg = "No sample matches \"" + search_.getText() + "\"";
+    else
+        msg = "No sounds in " + model_.spliceFolder().getFullPathName() + " yet.\n\nDownload sounds in the Splice app (Open Splice): they appear here.";
+    g.setColour (Theme::dim);
+    g.setFont (juce::FontOptions (13.0f));
+    g.drawFittedText (msg, table_.getBounds().reduced (40, 50), juce::Justification::centredTop, 6);
+}
+
 void LibraryView::resized()
 {
     auto r = getLocalBounds();
     auto top = r.removeFromTop (28).reduced (4, 3);
-    for (auto* b : { &newSmart_, &newCrate_, &seratoImport_, &addFolder_, &addFiles_ })
-        b->setBounds (top.removeFromRight (b == &seratoImport_ ? 100 : 66).reduced (2, 0));
+    if (splice())
+        for (auto* b : { &spliceRescan_, &spliceFolder_, &spliceOpen_ })
+            b->setBounds (top.removeFromRight (b == &spliceRescan_ ? 66 : 110).reduced (2, 0));
+    else
+        for (auto* b : { &newSmart_, &newCrate_, &seratoImport_, &addFolder_, &addFiles_, &analyse_ })
+            b->setBounds (top.removeFromRight (b == &seratoImport_ ? 100 : 66).reduced (2, 0));
     search_.setBounds (top.reduced (2, 0));
     sourceList_.setBounds (r.removeFromLeft (juce::jlimit (150, 240, getWidth() / 6)));
     table_.setBounds (r);

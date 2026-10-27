@@ -71,16 +71,20 @@ FxUnitView::FxUnitView (AppModel& model, int unit) : model_ (model), unit_ (unit
     beats_.setJustificationType (juce::Justification::centred);
     beats_.setColour (juce::Label::textColourId, Theme::text);
     addAndMakeVisible (beats_);
-    static const char* names[6] { "1", "2", "3", "4", "M", "S" };
     for (int t = 0; t < 6; ++t)
     {
         auto& b = assign_[(std::size_t) t];
-        b.setButtonText (names[t]);
-        styleToggle (b, Theme::deck (t < 4 ? t : 0).withSaturation (t < 4 ? 0.7f : 0.0f).withBrightness (t < 4 ? 0.95f : 0.85f));
-        b.onClick = [&u, t] { u.assign[t].store (! u.assign[t].load()); };
-        b.setTooltip (t < 4 ? "Assign to channel " + juce::String (t + 1) : t == 4 ? juce::String ("Assign to master") : juce::String ("Assign to sampler"));
+        b.onClick = [this, &u, t] { const int tg = target (t); u.assign[tg].store (! u.assign[tg].load()); };
         addAndMakeVisible (b);
     }
+}
+
+int FxUnitView::target (int button) const
+{
+    if (button == 4) return (int) dj::FxTarget::Master;
+    if (button == 5) return (int) dj::FxTarget::Sampler;
+    const int bank = model_.settings.deckCount == 8 ? model_.settings.deckBank : 0;
+    return bank * 4 + button;
 }
 
 void FxUnitView::stepBeats (int dir)
@@ -110,7 +114,19 @@ void FxUnitView::refresh()
     }
     const double bpm = u.tapMode.load() ? u.tapBpm.load() : unit.view.bpm.load();
     beats_.setText (beatsText (u.beats.load()) + (u.tapMode.load() ? "  TAP " + juce::String (bpm, 1) : juce::String()), juce::dontSendNotification);
-    for (int t = 0; t < 6; ++t) assign_[(std::size_t) t].setToggleState (u.assign[t].load(), juce::dontSendNotification);
+    for (int t = 0; t < 6; ++t)
+    {
+        auto& b = assign_[(std::size_t) t];
+        const int tg = target (t);
+        const auto text = t == 4 ? juce::String ("M") : t == 5 ? juce::String ("S") : juce::String (tg + 1);
+        if (b.getButtonText() != text)
+        {
+            b.setButtonText (text);
+            styleToggle (b, t < 4 ? Theme::deck (tg).withSaturation (0.7f).withBrightness (0.95f) : Theme::deck (0).withSaturation (0.0f).withBrightness (0.85f));
+            b.setTooltip (t < 4 ? "Assign to channel " + juce::String (tg + 1) : t == 4 ? juce::String ("Assign to master") : juce::String ("Assign to sampler"));
+        }
+        b.setToggleState (u.assign[tg].load(), juce::dontSendNotification);
+    }
 }
 
 void FxUnitView::paint (juce::Graphics& g)
@@ -155,13 +171,14 @@ BeatFxView::BeatFxView (AppModel& model) : model_ (model)
     type_.setSelectedId (2, juce::dontSendNotification);
     type_.onChange = [this] { model_.engine.setFxType (dj::kBeatFxUnit, 0, dj::flx10BeatFx (type_.getSelectedId() - 1)); };
     addAndMakeVisible (type_);
-    static const char* chans[7] { "CH1", "CH2", "CH3", "CH4", "MST", "SP", "-" };
-    for (int i = 0; i < 6; ++i) channel_.addItem (chans[i], i + 1);
-    channel_.setSelectedId (5, juce::dontSendNotification);
+    // items 1..8 = CH1..CH8, then MST and SP: item id - 1 is the FX target
+    for (int i = 0; i < dj::kNumDecks; ++i) channel_.addItem ("CH" + juce::String (i + 1), i + 1);
+    channel_.addItem ("MST", (int) dj::FxTarget::Master + 1);
+    channel_.addItem ("SP", (int) dj::FxTarget::Sampler + 1);
+    channel_.setSelectedId ((int) dj::FxTarget::Master + 1, juce::dontSendNotification);
     channel_.onChange = [this, &u]
     {
-        static constexpr int target[6] { 0, 1, 2, 3, (int) dj::FxTarget::Master, (int) dj::FxTarget::Sampler };
-        for (int t = 0; t < dj::kFxTargets; ++t) u.assign[t].store (t == target[channel_.getSelectedId() - 1]);
+        for (int t = 0; t < dj::kFxTargets; ++t) u.assign[t].store (t == channel_.getSelectedId() - 1);
     };
     addAndMakeVisible (channel_);
     auto step = [this, &u] (int dir)
@@ -208,8 +225,8 @@ void BeatFxView::refresh()
     const auto type = (dj::FxType) unit.view.type[0].load();
     for (int i = 0; i < dj::kFlx10BeatFxCount; ++i)
         if (dj::flx10BeatFx (i) == type && type_.getSelectedId() != i + 1) type_.setSelectedId (i + 1, juce::dontSendNotification);
-    static constexpr int target[6] { 0, 1, 2, 3, (int) dj::FxTarget::Master, (int) dj::FxTarget::Sampler };
-    for (int i = 0; i < 6; ++i) if (u.assign[target[i]].load() && channel_.getSelectedId() != i + 1) channel_.setSelectedId (i + 1, juce::dontSendNotification);
+    for (int t = 0; t < dj::kFxTargets; ++t)
+        if (u.assign[t].load() && channel_.getSelectedId() != t + 1) channel_.setSelectedId (t + 1, juce::dontSendNotification);
     const auto kind = dj::fxBeatKind (type);
     const juce::String amount = kind == dj::BeatKind::Size ? juce::String ((int) std::lround (u.params[0].load() * 100.0f)) + "%" : beatsText (u.beats.load());
     const double bpm = u.tapMode.load() ? u.tapBpm.load() : unit.view.bpm.load();

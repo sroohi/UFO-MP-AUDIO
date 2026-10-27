@@ -52,6 +52,36 @@ namespace
             addRow (label, std::move (s));
             return *raw;
         }
+        // a path with a "Choose..." button; empty means automatic
+        void path (const juce::String& label, juce::String& value, bool folder, const juce::String& help)
+        {
+            auto box = std::make_unique<PathBox> (value, folder, [this] { model.applySettings(); model.saveSettings(); });
+            addRow (label, std::move (box), help);
+        }
+        struct PathBox : juce::Component
+        {
+            PathBox (juce::String& v, bool folder, std::function<void()> changed) : value (v), isFolder (folder), onChanged (std::move (changed))
+            {
+                text.setText (value, juce::dontSendNotification);
+                text.setTextToShowWhenEmpty ("automatic", Theme::dim);
+                text.onTextChange = [this] { value = text.getText().trim(); onChanged(); };
+                addAndMakeVisible (text);
+                choose.onClick = [this]
+                {
+                    chooser = std::make_unique<juce::FileChooser> ("Choose", juce::File (value).exists() ? juce::File (value) : juce::File::getSpecialLocation (juce::File::userHomeDirectory));
+                    chooser->launchAsync (juce::FileBrowserComponent::openMode | (isFolder ? juce::FileBrowserComponent::canSelectDirectories : juce::FileBrowserComponent::canSelectFiles),
+                                          [this] (const juce::FileChooser& fc) { if (fc.getResult() != juce::File()) text.setText (fc.getResult().getFullPathName(), true); });
+                };
+                addAndMakeVisible (choose);
+            }
+            void resized() override { auto r = getLocalBounds(); choose.setBounds (r.removeFromRight (80)); text.setBounds (r.withTrimmedRight (4)); }
+            juce::String& value;
+            bool isFolder;
+            std::function<void()> onChanged;
+            juce::TextEditor text;
+            juce::TextButton choose { "Choose..." };
+            std::unique_ptr<juce::FileChooser> chooser;
+        };
         void resized() override
         {
             auto r = getLocalBounds().reduced (16);
@@ -110,9 +140,17 @@ namespace
                 "Loop in / out          Z / X             N / M\n"
                 "4-beat loop / exit     C                 ,\n"
                 "Pitch bend - / +       D / F             L / ;\n\n"
-                "Load selected track    SHIFT + LEFT / RIGHT (decks 1 / 2)\n"
-                "                       CMD + SHIFT + LEFT / RIGHT (decks 3 / 4)\n"
+                "Double-tap the cue key: play from the start\n"
+                "With 8 decks the keys play the left / right deck of the bank on screen (5 / 6 on the second bank).\n\n"
+                "PERFORMER (hold = momentary, SHIFT + key = latch)\n"
+                "  5 Stutter   6 Note Repeat   T Tape Stop   Y Pitch   G Filter\n"
+                "  H Talkbox   V Bitcrusher    B Delay       / Reverb\n\n"
+                "SAMPLER  OPTION + 1 ... 8   pads of the current bank (SHIFT stops)\n\n"
+                "Load selected track    SHIFT + LEFT / RIGHT (left / right deck)\n"
+                "                       CMD + SHIFT + LEFT / RIGHT (third / fourth deck)\n"
                 "Browse                 UP / DOWN,  TAB toggles crates / tracks\n"
+                "Keyboard control       CMD + K  (the KEYS button)\n"
+                "Decks 1-4 / 5-8        CMD + B  (8 decks)\n"
                 "Search                 CMD + F\n"
                 "Record the mix         CMD + R\n"
                 "Settings               CMD + ,\n");
@@ -139,6 +177,8 @@ SettingsView::SettingsView (AppModel& model) : model_ (model)
     ctrl->toggle ("Headphone mix done by the unit", s.phonesMixInHardware, [&s] (bool v) { s.phonesMixInHardware = v; },
                   "On for the DDJ-FLX10 (its HEADPHONES MIX / LEVEL knobs act in hardware); off for a plain interface");
     ctrl->slider ("Jog resolution (ticks / turn)", 128, 4096, 1, s.jogTicksPerRev, [&s] (double v) { s.jogTicksPerRev = (int) v; });
+    ctrl->toggle ("Computer keyboard as a controller (KEYS)", s.keyboardControl, [&s] (bool v) { s.keyboardControl = v; },
+                  "Decks, hot cues, loops, Performer and sampler pads on the keyboard. Off: the keyboard only types.");
     tabs_.addTab ("Controller", Theme::panel, ctrl, true);
 
     auto* decks = new Form (model);
@@ -150,7 +190,11 @@ SettingsView::SettingsView (AppModel& model) : model_ (model)
     decks->slider ("Platter stop time (brake)", 0.0, 3.0, 0.05, s.brakeSeconds, [&s] (double v) { s.brakeSeconds = (float) v; }, " s");
     decks->slider ("Platter start time", 0.0, 3.0, 0.05, s.startSeconds, [&s] (double v) { s.startSeconds = (float) v; }, " s");
     decks->toggle ("SLIP REVERSE cancels after 8 beats", s.slipReverseAutoCancel, [&s] (bool v) { s.slipReverseAutoCancel = v; });
-    decks->toggle ("Four decks", s.fourDecks, [&s] (bool v) { s.fourDecks = v; });
+    decks->combo ("Decks", { "2 decks", "4 decks", "8 decks (two banks of four)" }, s.deckCount == 2 ? 0 : s.deckCount == 4 ? 1 : 2,
+                  [&s] (int i) { s.deckCount = i == 0 ? 2 : i == 1 ? 4 : 8; if (s.deckCount != 8) s.deckBank = 0; },
+                  "With 8 decks, DECKS 1-4 / 5-8 (or SHIFT + VIEW on the FLX10) switches the bank on screen and on the controller");
+    decks->toggle ("Double-click CUE plays from the start", s.doubleClickCue, [&s] (bool v) { s.doubleClickCue = v; },
+                   "On screen and on the keyboard. The FLX10's CUE keeps CDJ behaviour (SHIFT + CUE jumps to the start).");
     decks->combo ("EQ type", { "DJM-style EQ (-26 / +6 dB)", "Isolator (full kill)" }, s.eqMode, [&s] (int i) { s.eqMode = i; });
     decks->slider ("Crossfader curve (smooth - sharp)", 0.0, 1.0, 0.01, s.xfCurve, [&s] (double v) { s.xfCurve = (float) v; });
     decks->slider ("Crossfader cut lag", 0.0, 0.1, 0.001, s.xfCutLag, [&s] (double v) { s.xfCutLag = (float) v; });
@@ -169,11 +213,17 @@ SettingsView::SettingsView (AppModel& model) : model_ (model)
     lib->toggle ("Separate stems after loading", s.autoStems, [&s] (bool v) { s.autoStems = v; },
                  "Built-in DSP separation (preview quality). Needed for ACTIVE PART, Part ISO, FX PART SELECT and Stem FX.");
     lib->toggle ("Show keys as Camelot", s.camelotKeys, [&s] (bool v) { s.camelotKeys = v; });
+    lib->toggle ("Analyse new tracks on import", s.analyseOnImport, [&s] (bool v) { s.analyseOnImport = v; },
+                 "BPM, beatgrid, key and loudness in the background, one track at a time");
+    lib->path ("Splice folder", s.spliceFolder, true, "Where the Splice app downloads sounds. Empty: ~/Splice/sounds or the other usual places.");
+    lib->path ("yt-dlp (YouTube / SoundCloud links)", s.ytDlpPath, false,
+               "yt-dlp is not bundled with DEEJ-AY. Install it (brew install yt-dlp; ffmpeg recommended) or choose the program. "
+               "Only download what you have the rights to.");
     tabs_.addTab ("Library & Analysis", Theme::panel, lib, true);
 
     tabs_.addTab ("Keyboard", Theme::panel, new KeyboardPage(), true);
     addAndMakeVisible (tabs_);
-    setSize (760, 560);
+    setSize (820, 600);
 }
 
 void SettingsView::resized() { tabs_.setBounds (getLocalBounds()); }

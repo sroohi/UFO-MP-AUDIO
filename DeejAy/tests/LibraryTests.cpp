@@ -321,6 +321,7 @@ MP_TEST (yt_dlp_arguments_and_progress)
     using namespace dj::library;
     const auto a = ytDlpArguments ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "/tmp/%(title)s.%(ext)s", true);
     CHECK (std::find (a.begin(), a.end(), "--no-playlist") != a.end());
+    CHECK (std::find (a.begin(), a.end(), "--progress") != a.end());   // --print would silence progress otherwise
     CHECK (std::find (a.begin(), a.end(), "m4a") != a.end());
     CHECK (a.back() == "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
     const auto b = ytDlpArguments ("u", "o", false);

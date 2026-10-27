@@ -168,7 +168,8 @@ const char* serviceName (LinkService s) noexcept
 
 std::vector<std::string> ytDlpArguments (const std::string& url, const std::string& outputTemplate, bool haveFfmpeg)
 {
-    std::vector<std::string> a { "--no-playlist", "--newline", "--no-warnings", "--restrict-filenames" };
+    // --print implies --quiet; --progress brings the progress lines back (one per line with --newline)
+    std::vector<std::string> a { "--no-playlist", "--newline", "--progress", "--no-warnings", "--restrict-filenames" };
     if (haveFfmpeg)
         a.insert (a.end(), { "-f", "bestaudio/best", "-x", "--audio-format", "m4a", "--audio-quality", "0" });
     else

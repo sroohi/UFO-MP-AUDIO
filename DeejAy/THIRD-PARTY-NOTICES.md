@@ -16,12 +16,17 @@ are design references at most, and none of their code is in this tree.
 | ITU-R BS.1770 loudness | Public standard | `engine/dj/analysis/Analysis.cpp` (auto gain) |
 | Serato tag layouts (Markers2, BeatGrid, crate files) | Format facts as documented publicly by the MIT-licensed `serato-tags` project; no code copied | `engine/dj/library/Tags.cpp`, `Library.cpp` (read-only import) |
 | DDJ-FLX10 MIDI message numbers | Published by AlphaTheta in the "List of MIDI Messages"; facts, not code | `engine/dj/midi/Flx10.cpp` |
+| yt-dlp | Unlicense. **Not bundled**: the user installs it; DEEJ-AY runs it as a separate program | URL box (YouTube / SoundCloud) |
+| Formant tables for the talkbox (A E I O U) | Published phonetics averages (Peterson & Barney 1952 style), implementation in-house | `engine/dj/Performer.cpp` |
 
 ## Trademarks
 Serato and Serato DJ Pro are trademarks of Serato Limited. Pioneer DJ, AlphaTheta and DDJ-FLX10 are
-trademarks of AlphaTheta Corporation. DEEJ-AY is an independent product by MP Audio. It is not affiliated
-with, endorsed by or sponsored by either company. The controller mapping exists so that owners of the
-hardware can use it with DEEJ-AY.
+trademarks of AlphaTheta Corporation. Splice is a trademark of Splice, Inc.; YouTube of Google LLC;
+SoundCloud of SoundCloud Global Limited & Co. KG; Spotify of Spotify AB. The Splice, YouTube, SoundCloud and
+Spotify features work with the user's own installs and accounts, and no partnership is implied.
+
+DEEJ-AY is an independent product by MP Audio. It is not affiliated with, endorsed by or sponsored by any of
+these companies. The controller mapping exists so that owners of the hardware can use it with DEEJ-AY.
 
 Planned additions (not yet in the tree): a Core ML stem model (HTDemucs weights are MIT), Ableton Link
 (GPLv2+ or a proprietary licence from link-devs@ableton.com), Signalsmith Stretch (MIT) as a higher-quality

@@ -89,7 +89,15 @@ DeckView::DeckView (AppModel& model, int deck) : model_ (model), deck_ (deck), o
     cue_.setColour (Theme::hot);
     play_.setColour (Theme::good);
     censor_.setColour (Theme::warn);
-    cue_.onPress = [this] (bool shift) { cmd (shift ? dj::Cmd::JumpToStart : dj::Cmd::CueDown); };
+    cue_.onPress = [this] (bool shift)
+    {
+        // double-click: play from the top (the hardware CUE keeps CDJ behaviour, so cue tapping still works)
+        const auto now = juce::Time::getMillisecondCounter();
+        const bool second = model_.settings.doubleClickCue && now - lastCueClick_ < 350;
+        lastCueClick_ = second ? 0 : now;
+        cmd (shift ? dj::Cmd::JumpToStart : second ? dj::Cmd::RestartFromStart : dj::Cmd::CueDown);
+    };
+    cue_.setTooltip ("CUE (hold to preview). Double-click: play from the start. SHIFT: jump to the start.");
     cue_.onRelease = [this] { cmd (dj::Cmd::CueUp); };
     play_.onPress = [this] (bool shift) { cmd (shift ? dj::Cmd::Stutter : dj::Cmd::PlayPause); };
     censor_.onPress = [this] (bool shift) { cmd (shift ? dj::Cmd::ReverseToggle : dj::Cmd::CensorDown); };
@@ -154,6 +162,20 @@ DeckView::DeckView (AppModel& model, int deck) : model_ (model), deck_ (deck), o
         p.onRelease = [this, i] { padUp (i); };
         addAndMakeVisible (p);
     }
+    url_.setTextToShowWhenEmpty ("Paste a YouTube / SoundCloud / Spotify link", Theme::dim);
+    url_.setColour (juce::TextEditor::backgroundColourId, Theme::bg);
+    url_.setColour (juce::TextEditor::outlineColourId, Theme::line);
+    url_.setColour (juce::TextEditor::textColourId, Theme::text);
+    url_.setFont (juce::FontOptions (12.0f));
+    url_.setSelectAllWhenFocused (true);
+    url_.onReturnKey = [this] { model_.loadFromLink (deck_, url_.getText()); unfocusAllComponents(); };
+    addAndMakeVisible (url_);
+    styleToggle (urlGo_, Theme::accent);
+    urlGo_.setTooltip ("Load the link onto this deck. YouTube and SoundCloud need yt-dlp installed (brew install yt-dlp); "
+                       "Spotify links load your own copy of the track from the library.");
+    urlGo_.onClick = [this] { model_.loadFromLink (deck_, url_.getText()); };
+    addAndMakeVisible (urlGo_);
+
     padModeChanged();
     trackChanged();
 }
@@ -382,8 +404,11 @@ void DeckView::refresh()
     const double pos = sr > 0 ? v.position.load() / sr : 0.0, len = sr > 0 ? (double) v.length.load() / sr : 0.0;
     const auto bpm = v.bpm.load();
     const auto newBpm = bpm > 0 ? juce::String (bpm, 1) : juce::String ("---.-");
-    const int key = dt.key >= 0 ? dj::transposeKey (dt.key, v.keyShift.load()) : -1;
-    const auto newKey = Theme::keyText (key, model_.settings.camelotKeys) + (v.keyShift.load() != 0 ? " (" + juce::String (v.keyShift.load() > 0 ? "+" : "") + juce::String (v.keyShift.load()) + ")" : "");
+    // the key as heard: key shift, plus the tempo fader's pitch when key lock is off
+    const int sounding = (int) std::lround (v.keyShift.load() + (v.keylock.load() ? 0.0 : 12.0 * std::log2 (juce::jmax (0.01, 1.0 + v.tempo.load()))));
+    const int key = dt.key >= 0 ? dj::transposeKey (dt.key, sounding) : -1;
+    const auto newKey = Theme::keyText (key, model_.settings.camelotKeys) + (sounding != 0 ? " (" + juce::String (sounding > 0 ? "+" : "") + juce::String (sounding) + ")" : "");
+    soundingKey_ = key;
     const auto newTime = Theme::formatTime (pos) + "  -" + Theme::formatTime (len - pos);
     const double tp = v.tempo.load() * 100.0;
     const auto newTempo = (tp >= 0.0 ? "+" : "") + juce::String (tp, 2) + "%";
@@ -391,6 +416,15 @@ void DeckView::refresh()
     {
         bpmText_ = newBpm; keyText_ = newKey; timeText_ = newTime; tempoText_ = newTempo;
         repaint (0, 0, getWidth(), 40);
+    }
+    if (dt.linkStatus != linkStatus_)
+    {
+        linkStatus_ = dt.linkStatus;
+        url_.setTooltip (linkStatus_);
+        // the button shows progress; the full message goes to the status bar (AppModel::setLinkStatus)
+        const auto pct = linkStatus_.fromLastOccurrenceOf (" ", false, false);
+        urlGo_.setButtonText (linkStatus_.contains ("downloading") ? pct : linkStatus_.endsWith ("...") ? juce::String ("...") : juce::String ("LOAD"));
+        urlGo_.setToggleState (linkStatus_.contains ("downloading") || linkStatus_.endsWith ("..."), juce::dontSendNotification);
     }
     overview_.refresh();
     platter_.refresh();
@@ -418,7 +452,7 @@ void DeckView::paint (juce::Graphics& g)
     g.setFont (juce::FontOptions (11.5f));
     g.setColour (Theme::dim);
     g.drawText (timeText_, line2.removeFromRight (150), juce::Justification::centredRight);
-    g.setColour (Theme::key (dt.key >= 0 ? dj::transposeKey (dt.key, model_.engine.deck (deck_).view.keyShift.load()) : -1));
+    g.setColour (Theme::key (soundingKey_));
     g.setFont (juce::FontOptions (11.5f, juce::Font::bold));
     g.drawText (keyText_, line2.removeFromRight (64), juce::Justification::centredRight);
     g.setColour (Theme::dim);
@@ -430,6 +464,10 @@ void DeckView::resized()
 {
     auto r = getLocalBounds().reduced (4);
     r.removeFromTop (38);
+    auto urlRow = r.removeFromTop (22);
+    urlGo_.setBounds (urlRow.removeFromRight (48).reduced (1, 1));
+    url_.setBounds (urlRow.reduced (0, 1));
+    r.removeFromTop (3);
     overview_.setBounds (r.removeFromTop (22));
     r.removeFromTop (4);
 
@@ -482,8 +520,15 @@ void DeckView::resized()
 
 void DeckView::itemDropped (const SourceDetails& d)
 {
-    const auto id = (std::uint64_t) d.description.toString().fromFirstOccurrenceOf ("track:", false, false).getLargeIntValue();
-    model_.loadTrack (deck_, id);
+    const auto s = d.description.toString();
+    if (s.startsWith ("sample:"))
+    {
+        // a Splice sample: into the library (crate "Splice") and onto this deck
+        const auto lines = juce::StringArray::fromLines (s.fromFirstOccurrenceOf ("\n", false, false));
+        if (! lines.isEmpty()) model_.importAndLoad (juce::File (lines[0]), deck_, "Splice");
+        return;
+    }
+    model_.loadTrack (deck_, (std::uint64_t) s.fromFirstOccurrenceOf ("track:", false, false).getLargeIntValue());
 }
 
 void DeckView::filesDropped (const juce::StringArray& files, int, int)

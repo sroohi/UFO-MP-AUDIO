@@ -103,6 +103,7 @@ if(DEEJAY_BUILD_APP)
         app/WaveformView.cpp
         app/DeckView.cpp
         app/MixerView.cpp
+        app/PerformerView.cpp
         app/FxView.cpp
         app/SamplerView.cpp
         app/LibraryView.cpp
