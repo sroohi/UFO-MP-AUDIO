@@ -273,6 +273,78 @@ MP_TEST (auto_loop_wraps_sample_exactly)
     CHECK (! r.d.view.loopActive.load());
 }
 
+MP_TEST (loops_never_extend_past_the_track_end)
+{
+    DeckRig r (rampTrack (10.0));                 // 480000 frames, 20 beats at 120 BPM
+    r.grid (120.0);
+    r.ctx.quantize = true;
+    r.d.setPosition (480000.0 - 30000.0);         // 1.25 beats before the end
+    r.d.play();
+    r.run (1);
+    r.d.autoLoop (4.0);                           // 4 beats would end 2.75 beats past the end
+    r.run (1);
+    CHECK (r.d.view.loopOut.load() <= 480000.0);
+    r.run (200000);                               // keeps looping inside the track
+    CHECK (r.d.position() < 480000.0);
+    CHECK (r.d.playing());
+    r.d.beatJump (4.0);                           // moving the loop past the end is refused
+    r.run (1);
+    CHECK (r.d.view.loopOut.load() <= 480000.0);
+    r.d.exitLoop();
+    r.run (100000);                               // and without the loop the track still ends cleanly
+    CHECK (! r.d.playing());
+    CHECK_NEAR (r.d.position(), 480000.0, 1e-9);
+}
+
+MP_TEST (loops_and_rolls_before_the_first_beat_stay_in_the_track)
+{
+    // first beat 2172 frames in (as analysed on a real track): the grid cell around 0 starts before the
+    // track, which used to give a loop with a negative in point that never wrapped
+    DeckRig r (rampTrack (10.0));
+    r.grid (124.0, 2172.0);
+    r.ctx.quantize = true;
+    r.run (1);                                    // quantize reaches the deck with the first block
+    r.d.autoLoop (4.0);                           // paused at 0:00, as from the keyboard
+    r.run (1);
+    CHECK (r.d.view.loopActive.load());
+    CHECK (r.d.view.loopIn.load() >= 0.0);
+    const double in = r.d.view.loopIn.load(), out = r.d.view.loopOut.load();
+    r.d.play();
+    r.run (480000 * 2);                           // twice the track length: must still be looping
+    CHECK (r.d.playing());
+    CHECK (r.d.position() >= in - 1.0 && r.d.position() < out);
+
+    DeckRig q (rampTrack (10.0));
+    q.grid (124.0, 2172.0);
+    q.ctx.quantize = true;
+    q.d.setSlicer (SlicerMode::SlicerLoop, 8.0, 1.0);
+    q.run (1);
+    CHECK (q.d.view.loopIn.load() >= 0.0);
+    q.d.setSlicer (SlicerMode::Off, 8.0, 1.0);
+    q.d.play();
+    q.d.rollDown (1.0);
+    q.run (1);
+    CHECK (q.d.view.rollIn.load() >= 0.0);
+    q.run (100000);
+    CHECK (q.d.position() < 480000.0);
+    q.d.rollUp();
+}
+
+MP_TEST (an_active_loop_behind_the_playhead_does_not_stop_the_track_ending)
+{
+    DeckRig r (rampTrack (10.0));
+    r.grid (120.0);
+    r.d.setPosition (24000.0);
+    r.d.autoLoop (4.0);                           // loop 0 .. 96000
+    r.run (1);
+    CHECK (r.d.view.loopActive.load());
+    r.d.setPosition (200000.0);                   // needle drop past the loop: the loop stays armed
+    r.d.play();
+    r.run (480000);
+    CHECK (! r.d.playing());
+    CHECK_NEAR (r.d.position(), 480000.0, 1e-9);
+}
+
 MP_TEST (manual_loop_halve_double_reloop)
 {
     DeckRig r (rampTrack());
@@ -572,6 +644,37 @@ MP_TEST (sync_matches_tempo_and_phase)
     rig.run (48000);
     CHECK_NEAR (d1.effectiveBpm(), 124.8, 1e-6);
     CHECK_NEAR (wrapHalf (d0.beatPhase() - d1.beatPhase()), 0.0, 0.003);
+}
+
+MP_TEST (sync_holds_phase_through_loops)
+{
+    // the app's smoke test: leader in a 4-beat loop, follower synced, played, then looped
+    EngineRig rig;
+    rig.e.loadDeck (0, rampTrack (30.0));
+    rig.e.loadDeck (1, rampTrack (30.0));
+    Command g; g.type = Cmd::DeckSetGrid; g.deck = 0; g.value = 124.0; g.value2 = 1234.0; rig.e.post (g);
+    g.deck = 1; g.value = 128.0; g.value2 = 777.0; rig.e.post (g);
+    rig.e.deckCommand (Cmd::Play, 0);
+    rig.run (30000);
+    rig.e.deckCommand (Cmd::FourBeatExit, 0);
+    rig.run (20000);
+    rig.e.deckCommand (Cmd::SetPosition, 1, 0, 90000.0);
+    rig.e.deckCommand (Cmd::SyncOn, 1);
+    rig.e.deckCommand (Cmd::Play, 1);
+    rig.run (7000);
+    rig.e.deckCommand (Cmd::FourBeatExit, 1);
+    auto& d0 = rig.e.deck (0);
+    auto& d1 = rig.e.deck (1);
+    double worst = 0.0;
+    for (int i = 0; i < 400; ++i)   // ~4.3 s: several loop wraps on both decks
+    {
+        rig.run (512);
+        worst = std::max (worst, std::abs (wrapHalf (d0.beatPhase() - d1.beatPhase())));
+    }
+    CHECK (d0.view.loopActive.load());
+    CHECK (d1.view.loopActive.load());
+    CHECK_NEAR (d1.effectiveBpm(), 124.0, 1e-6);
+    CHECK (worst < 0.01);
 }
 
 MP_TEST (sync_matches_half_and_double_tempo)

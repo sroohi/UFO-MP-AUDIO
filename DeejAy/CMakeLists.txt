@@ -59,3 +59,69 @@ if(DEEJAY_BUILD_TESTS)
     target_link_libraries(deejay_tests PRIVATE deejay_engine)
     add_test(NAME engine COMMAND deejay_tests)
 endif()
+
+# ---------------------------------------------------------------------------------------------
+# app
+# ---------------------------------------------------------------------------------------------
+if(DEEJAY_BUILD_APP)
+    if(DEEJAY_JUCE_DIR)
+        add_subdirectory(${DEEJAY_JUCE_DIR} ${CMAKE_BINARY_DIR}/juce EXCLUDE_FROM_ALL)
+    else()
+        include(FetchContent)
+        FetchContent_Declare(juce
+            GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+            GIT_TAG        ${DEEJAY_JUCE_TAG}
+            GIT_SHALLOW    TRUE
+            GIT_PROGRESS   TRUE)
+        FetchContent_MakeAvailable(juce)
+    endif()
+
+    juce_add_gui_app(DeejAy
+        PRODUCT_NAME "DEEJ-AY"
+        COMPANY_NAME "MP Audio"
+        COMPANY_COPYRIGHT "MP Audio"
+        BUNDLE_ID com.mpaudio.deejay
+        VERSION ${PROJECT_VERSION}
+        ICON_BIG ${CMAKE_CURRENT_SOURCE_DIR}/resources/icon-1024.png
+        HARDENED_RUNTIME_ENABLED TRUE
+        HARDENED_RUNTIME_OPTIONS "com.apple.security.device.audio-input"
+        MICROPHONE_PERMISSION_ENABLED TRUE
+        MICROPHONE_PERMISSION_TEXT "DEEJ-AY uses your DJ controller's audio interface."
+        PLIST_TO_MERGE "<plist><dict><key>LSApplicationCategoryType</key><string>public.app-category.music</string><key>NSHighResolutionCapable</key><true/></dict></plist>")
+
+    juce_generate_juce_header(DeejAy)
+
+    target_sources(DeejAy PRIVATE
+        app/Main.cpp
+        app/AppModel.cpp
+        app/AudioHost.cpp
+        app/MidiHost.cpp
+        app/WaveformView.cpp
+        app/DeckView.cpp
+        app/MixerView.cpp
+        app/FxView.cpp
+        app/SamplerView.cpp
+        app/LibraryView.cpp
+        app/SettingsView.cpp
+        app/MainComponent.cpp)
+    target_include_directories(DeejAy PRIVATE app)
+
+    target_compile_definitions(DeejAy PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_USE_MP3AUDIOFORMAT=1
+        JUCE_MODAL_LOOPS_PERMITTED=0
+        JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:DeejAy,JUCE_PRODUCT_NAME>"
+        JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:DeejAy,JUCE_VERSION>")
+
+    target_link_libraries(DeejAy PRIVATE
+        deejay_engine
+        juce::juce_audio_utils
+        juce::juce_audio_devices
+        juce::juce_audio_formats
+        juce::juce_gui_extra
+        PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags)
+endif()

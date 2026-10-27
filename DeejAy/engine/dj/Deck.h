@@ -295,6 +295,7 @@ private:
     double framesPerBeat() const noexcept;
     double snap (double pos) const noexcept;  // quantized cue placement
     double quantizedJumpTarget (double target) const noexcept;
+    double cellStartInTrack (double pos, double beats) const noexcept;
     void beginSlip() noexcept;
     void endSlip() noexcept;
     void storeLoopInSlot() noexcept;

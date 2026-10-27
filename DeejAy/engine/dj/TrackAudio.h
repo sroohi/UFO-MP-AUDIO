@@ -66,7 +66,7 @@ struct TrackAudio
         if (! hasStems) return;
         for (int s = 0; s < 3; ++s)
         {
-            if (coeff[s] == 0.0f) continue;
+            if (std::abs (coeff[s]) < 1.0e-9f) continue;
             const float c = coeff[s] * stemScale;
             l += c * (float) stems[s][k];
             r += c * (float) stems[s][k + 1];

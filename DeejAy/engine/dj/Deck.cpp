@@ -115,6 +115,16 @@ double Deck::snap (double pos) const noexcept
     return grid_.roundTo (pos, quantizeBeats_, audio_->sampleRate);
 }
 
+// Start of the `beats`-long grid cell containing pos. Before the first beat that cell starts before the
+// track; loops, rolls and slicer domains then use the first whole cell inside it instead.
+double Deck::cellStartInTrack (double pos, double beats) const noexcept
+{
+    const double start = grid_.floorTo (pos, beats, audio_->sampleRate);
+    if (start >= 0.0) return start;
+    const double cell = beats * framesPerBeat();
+    return start + std::ceil (-start / cell) * cell;
+}
+
 // With quantize on, a jump keeps the playhead's offset within the quantize cell, so the deck stays
 // on the beat (cues themselves are snapped to the grid when set).
 double Deck::quantizedJumpTarget (double target) const noexcept
@@ -478,13 +488,16 @@ void Deck::autoLoop (double beats) noexcept
     if (loopActive_ && loop_.valid())
         in = loop_.in; // resizing an active loop keeps its in point
     else
-        in = quantize_ ? grid_.floorTo (pos_, std::min (beats, 1.0), audio_->sampleRate) : pos_;
-    loop_ = { in, in + len };
+        in = quantize_ ? cellStartInTrack (pos_, std::min (beats, 1.0)) : pos_;
+    // a loop never reaches past the end of the track
+    const double out = std::min (in + len, (double) audio_->frames);
+    if (out - in < 32.0) return;
+    loop_ = { in, out };
     loopActive_ = true;
     loopInPending_ = false;
     storeLoopInSlot();
     if (slipEnabled_ && ! slipLoop_) { slipLoop_ = true; beginSlip(); }
-    if (pos_ >= loop_.out) jumpTo (loop_.in + std::fmod (pos_ - loop_.in, len));
+    if (pos_ >= loop_.out) jumpTo (loop_.in + std::fmod (pos_ - loop_.in, loop_.length()));
 }
 
 void Deck::loopHalve() noexcept
@@ -508,7 +521,7 @@ void Deck::loopShift (double beats) noexcept
 {
     if (! loop_.valid() || ! hasGrid()) return;
     const double d = beats * framesPerBeat();
-    if (loop_.in + d < 0.0) return;
+    if (loop_.in + d < 0.0 || loop_.out + d > (double) audio_->frames) return;
     loop_.in += d; loop_.out += d;
     if (loopActive_) jumpTo (pos_ + d);
 }
@@ -572,8 +585,9 @@ void Deck::rollDown (double beats) noexcept
 {
     if (! hasGrid() || beats <= 0.0) return;
     const double len = beats * framesPerBeat();
-    const double in = grid_.floorTo (pos_, beats, audio_->sampleRate);
-    roll_ = { in, in + len };
+    const double in = cellStartInTrack (pos_, beats);
+    if ((double) audio_->frames - in < 32.0) return;
+    roll_ = { in, std::min (in + len, (double) audio_->frames) };
     rollActive_ = true;
     if (! rollHeld_) { rollHeld_ = true; beginSlip(); }
 }
@@ -590,7 +604,7 @@ void Deck::beatJump (double beats) noexcept
 {
     if (audio_ == nullptr) return;
     const double d = hasGrid() ? beats * framesPerBeat() : beats * 0.5 * audio_->sampleRate;
-    if (loopActive_ && loop_.valid() && loop_.in + d >= 0.0) { loop_.in += d; loop_.out += d; }
+    if (loopActive_ && loop_.valid() && loop_.in + d >= 0.0 && loop_.out + d <= (double) audio_->frames) { loop_.in += d; loop_.out += d; }
     jumpTo (pos_ + d);
 }
 
@@ -602,7 +616,7 @@ void Deck::setSlicer (SlicerMode mode, double domainBeats, double quantize) noex
     slicerDomainBeats_ = std::clamp (domainBeats, 2.0, 64.0);
     slicerQuant_ = std::clamp (quantize, 0.125, 1.0);
     if (! hasGrid()) { slicerMode_ = SlicerMode::Off; return; }
-    slicerDomainStart_ = grid_.floorTo (pos_, slicerDomainBeats_, audio_->sampleRate);
+    slicerDomainStart_ = cellStartInTrack (pos_, slicerDomainBeats_);
     if (mode == SlicerMode::SlicerLoop)
     {
         loop_ = { slicerDomainStart_, slicerDomainStart_ + slicerDomainBeats_ * framesPerBeat() };
@@ -895,7 +909,7 @@ void Deck::process (float* const* bus, int n, const DeckContext& ctx, bool* busA
 
     // ---- slicer domain follows the (background) playhead
     if (slicerMode_ == SlicerMode::Slicer && grid_.valid() && heldSlice_ < 0)
-        slicerDomainStart_ = grid_.floorTo (slipHolds_ > 0 ? slipPos_ : pos_, slicerDomainBeats_, trackSr);
+        slicerDomainStart_ = cellStartInTrack (slipHolds_ > 0 ? slipPos_ : pos_, slicerDomainBeats_);
 
     // ---- stems
     const bool stems = audio_->hasStems;
@@ -1038,7 +1052,9 @@ void Deck::process (float* const* bus, int n, const DeckContext& ctx, bool* busA
             && grid_.beatAt (slipPos_, trackSr) - censorStartBeat_ >= 8.0)
             censorUp();
 
-        if (pos_ >= (double) audio_->frames && rate > 0.0 && ! loopActive_)
+        // an active loop inside the track has already wrapped the playhead above; reaching the end means
+        // no loop is going to catch it (none, or one behind the playhead)
+        if (pos_ >= (double) audio_->frames && rate > 0.0)
         {
             pos_ = (double) audio_->frames;
             playing_ = false;

@@ -575,7 +575,11 @@ void Engine::processBlock (float* const* outputs, int numOutputs, int n) noexcep
     const float xfLag = mixer.xfCutLag.load (std::memory_order_relaxed);
     const float chCurve = mixer.chFaderCurve.load (std::memory_order_relaxed);
     double unitBpms[kTotalFxUnits];
-    for (int u = 0; u < kTotalFxUnits; ++u) unitBpms[u] = unitBpm (u);
+    for (int u = 0; u < kTotalFxUnits; ++u)
+    {
+        unitBpms[u] = unitBpm (u);
+        fxUnits_[(std::size_t) u].view.bpm.store (unitBpms[u], std::memory_order_relaxed);
+    }
 
     auto runUnits = [&] (int target, FxPlacement stage, bool anyStage, float* l, float* r)
     {

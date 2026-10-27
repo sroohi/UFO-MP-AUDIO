@@ -124,9 +124,10 @@ void Library::applySeratoPrep (Track& t, const TagInfo& tags, double sr)
         }
     if (tags.gridBpm > 0.0 && tags.gridAnchorSeconds >= 0.0)
     {
+        // a grid prepared in Serato is authoritative: analysis must not overwrite it
         t.bpm = tags.gridBpm;
         t.gridAnchor = tags.gridAnchorSeconds * sr;
-        t.gridLocked = tags.bpmLocked;
+        t.gridLocked = true;
     }
     if (tags.hasTrackColor) t.color = tags.trackColor;
 }
