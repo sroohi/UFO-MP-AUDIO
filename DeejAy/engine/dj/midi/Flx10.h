@@ -86,6 +86,15 @@ public:
     static double rollBeats (int pad, int shift) noexcept;
     static double autoLoopBeats (int pad, int shift) noexcept;
 
+    // The unit has four deck channels; the deck layer maps them to decks 1-4 (layer 0) or 5-8 (layer 1).
+    static constexpr int kHwDecks = 4;
+    void setDeckLayer (int layer) noexcept
+    {
+        deckLayer_.store (std::clamp (layer, 0, kNumDecks / kHwDecks - 1));
+        resetOutputCache();
+    }
+    int deckLayer() const noexcept { return deckLayer_.load(); }
+
     // Tunables (Settings)
     std::atomic<bool> faderStart { true };
     std::atomic<bool> applyMasterLevel { false };   // the FLX10 applies MASTER/BOOTH level in hardware
@@ -109,6 +118,8 @@ private:
     std::array<std::atomic<bool>, kNumDecks> shift_ {};
     std::array<std::atomic<bool>, kNumDecks> loopInHeld_ {}, loopOutHeld_ {}, beatJumpHeld_ {};
     std::atomic<int> leftDeck_ { 0 }, rightDeck_ { 1 };
+    std::atomic<int> deckLayer_ { 0 };
+    int layerOffset() const noexcept { return kHwDecks * deckLayer_.load(); }
     std::array<std::array<std::uint8_t, 128>, 16> msb_ {};
     std::array<double, kNumDecks> lastBrowsePress_ {};   // seconds, for the double-press Instant Doubles
     std::atomic<int> beatFxPosition_ { 1 };

@@ -130,16 +130,16 @@ void Flx10::handle (const Message& m) noexcept
     if (type == 0x90 || type == 0x80)
     {
         const bool on = type == 0x90 && m.data2 > 0;
-        if (ch < kNumDecks) deckNote (ch, m.data1, on);
+        if (ch < kHwDecks) deckNote (ch + layerOffset(), m.data1, on);
         else if (ch == kChEffect) fxNote (m.data1, on);
         else if (ch == kChGlobal) globalNote (m.data1, on);
-        else if (ch >= kChFirstPad && ch < kChFirstPad + 2 * kNumDecks)
-            padNote ((ch - kChFirstPad) / 2, ((ch - kChFirstPad) & 1) != 0, m.data1, on);
+        else if (ch >= kChFirstPad && ch < kChFirstPad + 2 * kHwDecks)
+            padNote ((ch - kChFirstPad) / 2 + layerOffset(), ((ch - kChFirstPad) & 1) != 0, m.data1, on);
         return;
     }
     if (type == 0xB0)
     {
-        if (ch < kNumDecks) deckCc (ch, m.data1, m.data2);
+        if (ch < kHwDecks) deckCc (ch + layerOffset(), m.data1, m.data2);
         else if (ch == kChEffect) fxCc (m.data1, m.data2);
         else if (ch == kChGlobal) globalCc (m.data1, m.data2);
     }
@@ -209,7 +209,7 @@ void Flx10::deckNote (int d, int note, bool on) noexcept
         case 0x71: command (on ? Cmd::SearchDown : Cmd::SearchUp, d, 1); return;
         // deck select: state message, the selected deck's channel carries 0x7F
         case 0x3C:
-            if (on) { if (d == 0 || d == 2) leftDeck_.store (d); else rightDeck_.store (d); resetOutputCache(); }
+            if (on) { if (d % kHwDecks == 0 || d % kHwDecks == 2) leftDeck_.store (d); else rightDeck_.store (d); resetOutputCache(); }
             return;
         case 0x72: return;
         // pad mode buttons
@@ -291,7 +291,7 @@ void Flx10::deckCc (int d, int cc, int v) noexcept
         default: break;
     }
     const int base = cc < 32 ? cc : cc - 32;
-    const float x = fourteenBit (d, cc, v);
+    const float x = fourteenBit (d % kHwDecks, cc, v);
     switch (base)
     {
         case 0x00: case 0x05:   // TEMPO slider ('-' end = min)
@@ -369,10 +369,11 @@ void Flx10::globalNote (int note, bool on) noexcept
 {
     auto& mx = engine_.mixer;
     // BROWSE press with a deck selected: load; twice quickly on that deck = Instant Doubles
-    static constexpr int loadNotes[4] { 0x46, 0x47, 0x48, 0x49 };
-    for (int d = 0; d < kNumDecks; ++d)
-        if (note == loadNotes[d])
+    static constexpr int loadNotes[kHwDecks] { 0x46, 0x47, 0x48, 0x49 };
+    for (int hw = 0; hw < kHwDecks; ++hw)
+        if (note == loadNotes[hw])
         {
+            const int d = hw + layerOffset();
             if (! on) return;
             const double t = now();
             if (t - lastBrowsePress_[(std::size_t) d] < 0.45) host_.instantDoubles (d);
@@ -413,7 +414,7 @@ void Flx10::globalNote (int note, bool on) noexcept
     // SHIFT + ACTIVE PART pressed twice: Part Instant Doubles (decks 1-4)
     if (note >= 0x24 && note <= 0x2F)
     {
-        const int group = (note - 0x24) / 4, d = (note - 0x24) % 4;
+        const int group = (note - 0x24) / 4, d = (note - 0x24) % 4 + layerOffset();
         const int mask = group == 0 ? (1 << (int) Stem::Drums) : group == 1 ? (1 << (int) Stem::Vocals) : ((1 << (int) Stem::Melody) | (1 << (int) Stem::Bass));
         host_.partInstantDoubles (d, mask);
     }
@@ -436,7 +437,7 @@ void Flx10::globalCc (int cc, int v) noexcept
         case 0x0D: mx.phonesLevel.store (x); return;
         case 0x03: mx.samplerVolume.store (x); return;
         case 0x17: case 0x18: case 0x19: case 0x1A:
-            mx.ch[(std::size_t) (base - 0x17)].color.store (x * 2.0f - 1.0f);
+            mx.ch[(std::size_t) (base - 0x17 + layerOffset())].color.store (x * 2.0f - 1.0f);
             return;
         default: return;   // MIC EQ: processed on the unit
     }
@@ -457,7 +458,8 @@ void Flx10::fxNote (int note, bool on) noexcept
     {
         if (! on) return;
         static constexpr int target[7] { 0, 1, 2, 3, (int) FxTarget::Master, -1, (int) FxTarget::Sampler };
-        for (int t = 0; t < kFxTargets; ++t) u.assign[t].store (t == target[note - 0x10]);
+        const int pick = target[note - 0x10] >= 0 && target[note - 0x10] < kHwDecks ? target[note - 0x10] + layerOffset() : target[note - 0x10];
+        for (int t = 0; t < kFxTargets; ++t) u.assign[t].store (t == pick);
         return;
     }
     if (! on) return;
@@ -521,10 +523,11 @@ void Flx10::collectOutput (std::vector<Message>& out)
 {
     if (resendAll_.exchange (false)) sent_.clear();
     const auto led = [] (bool on) -> std::uint8_t { return on ? 0x7F : 0x00; };
-    for (int d = 0; d < kNumDecks; ++d)
+    for (int hw = 0; hw < kHwDecks; ++hw)
     {
+        const int d = hw + layerOffset();          // engine deck shown on this hardware deck
         const auto& v = engine_.deck (d).view;
-        const auto st = (std::uint8_t) (0x90 | d);
+        const auto st = (std::uint8_t) (0x90 | hw);
         const bool loaded = v.loaded.load();
         const bool playing = v.playing.load();
         const double sr = v.trackSampleRate.load();
@@ -555,18 +558,18 @@ void Flx10::collectOutput (std::vector<Message>& out)
         put (out, st, 0x22, led (mode == PadMode::Sampler || mode == PadMode::KeyShift));
 
         // pads (page 1 notes of the active mode)
-        const auto padSt = (std::uint8_t) (0x90 | (kChFirstPad + 2 * d));
-        int hw = HwHotCue;
+        const auto padSt = (std::uint8_t) (0x90 | (kChFirstPad + 2 * hw));
+        int padBase = HwHotCue;
         switch (mode)
         {
-            case PadMode::PadFx: hw = HwPadFx1; break;
-            case PadMode::Roll: hw = HwPadFx2; break;
-            case PadMode::BeatJump: hw = HwBeatJump; break;
-            case PadMode::AutoLoop: hw = HwBeatLoop; break;
-            case PadMode::Sampler: hw = HwSampler; break;
-            case PadMode::PitchPlay: hw = HwKeyboard; break;
-            case PadMode::KeyShift: hw = HwKeyShift; break;
-            default: hw = HwHotCue; break;
+            case PadMode::PadFx: padBase = HwPadFx1; break;
+            case PadMode::Roll: padBase = HwPadFx2; break;
+            case PadMode::BeatJump: padBase = HwBeatJump; break;
+            case PadMode::AutoLoop: padBase = HwBeatLoop; break;
+            case PadMode::Sampler: padBase = HwSampler; break;
+            case PadMode::PitchPlay: padBase = HwKeyboard; break;
+            case PadMode::KeyShift: padBase = HwKeyShift; break;
+            default: padBase = HwHotCue; break;
         }
         for (int p = 0; p < 8; ++p)
         {
@@ -593,34 +596,34 @@ void Flx10::collectOutput (std::vector<Message>& out)
                     break;
                 default: break;
             }
-            put (out, padSt, (std::uint8_t) (hw * 16 + p), led (lit));
+            put (out, padSt, (std::uint8_t) (padBase * 16 + p), led (lit));
         }
 
         // On Jog Display (channel 16) and the channel meter
         const auto disp = (std::uint8_t) (0xB0 | kChDisplay);
         const auto dispNote = (std::uint8_t) (0x90 | kChDisplay);
         const int bpm10 = std::clamp ((int) std::lround (v.bpm.load() * 10.0), 0, 9999);
-        put (out, disp, (std::uint8_t) (0x14 + d), (std::uint8_t) (bpm10 >> 7));
-        put (out, disp, (std::uint8_t) (0x34 + d), (std::uint8_t) (bpm10 & 0x7F));
+        put (out, disp, (std::uint8_t) (0x14 + hw), (std::uint8_t) (bpm10 >> 7));
+        put (out, disp, (std::uint8_t) (0x34 + hw), (std::uint8_t) (bpm10 & 0x7F));
         // playing speed -100.0 .. +100.0 % over 0 .. 9999 (encoding to be confirmed on hardware)
         const double pct = std::clamp (v.tempo.load() * 100.0, -100.0, 100.0);
         const int sp = (int) std::lround ((pct + 100.0) / 200.0 * 9999.0);
-        put (out, disp, (std::uint8_t) (0x18 + d), (std::uint8_t) (sp >> 7));
-        put (out, disp, (std::uint8_t) (0x38 + d), (std::uint8_t) (sp & 0x7F));
+        put (out, disp, (std::uint8_t) (0x18 + hw), (std::uint8_t) (sp >> 7));
+        put (out, disp, (std::uint8_t) (0x38 + hw), (std::uint8_t) (sp & 0x7F));
         const double elapsed = sr > 0 ? pos / sr : 0.0;
-        put (out, disp, (std::uint8_t) (0x42 + 2 * d), (std::uint8_t) std::clamp ((int) (elapsed / 60.0), 0, 99));
-        put (out, disp, (std::uint8_t) (0x43 + 2 * d), (std::uint8_t) std::clamp ((int) std::fmod (elapsed, 60.0), 0, 99));
+        put (out, disp, (std::uint8_t) (0x42 + 2 * hw), (std::uint8_t) std::clamp ((int) (elapsed / 60.0), 0, 99));
+        put (out, disp, (std::uint8_t) (0x43 + 2 * hw), (std::uint8_t) std::clamp ((int) std::fmod (elapsed, 60.0), 0, 99));
         // Digital Marker: the platter angle (one turn = 1.8 s)
         const int angle = (int) std::fmod (elapsed / 1.8 * 360.0, 360.0);
-        put (out, disp, (std::uint8_t) (0x10 + d), (std::uint8_t) (angle >> 7));
-        put (out, disp, (std::uint8_t) (0x30 + d), (std::uint8_t) (angle & 0x7F));
-        put (out, dispNote, (std::uint8_t) (0x20 + d), led (v.keylock.load()));
-        put (out, dispNote, (std::uint8_t) (0x18 + d), led (v.leader.load()));
-        put (out, dispNote, (std::uint8_t) (0x1C + d), led (v.sync.load()));
-        put (out, (std::uint8_t) (0xB0 | d), 0x4A, (std::uint8_t) std::clamp (0x0D + v.keyShift.load(), 0x01, 0x19));
+        put (out, disp, (std::uint8_t) (0x10 + hw), (std::uint8_t) (angle >> 7));
+        put (out, disp, (std::uint8_t) (0x30 + hw), (std::uint8_t) (angle & 0x7F));
+        put (out, dispNote, (std::uint8_t) (0x20 + hw), led (v.keylock.load()));
+        put (out, dispNote, (std::uint8_t) (0x18 + hw), led (v.leader.load()));
+        put (out, dispNote, (std::uint8_t) (0x1C + hw), led (v.sync.load()));
+        put (out, (std::uint8_t) (0xB0 | hw), 0x4A, (std::uint8_t) std::clamp (0x0D + v.keyShift.load(), 0x01, 0x19));
         const float peak = engine_.mixerView.channelPeak[d].load();
         const float db = gainToDb (peak);
-        put (out, (std::uint8_t) (0xB0 | d), 0x02, (std::uint8_t) std::clamp ((int) ((db + 48.0f) / 48.0f * 127.0f), 0, 127));
+        put (out, (std::uint8_t) (0xB0 | hw), 0x02, (std::uint8_t) std::clamp ((int) ((db + 48.0f) / 48.0f * 127.0f), 0, 127));
     }
     // effects section
     const bool sel[3] { engine_.fxPart[(int) Stem::Vocals].load(), engine_.fxPart[(int) Stem::Drums].load(), engine_.fxPart[(int) Stem::Melody].load() };

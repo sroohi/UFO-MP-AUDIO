@@ -19,7 +19,7 @@
 namespace dj
 {
 
-constexpr int kNumDecks = 4;
+constexpr int kNumDecks = 8;          // the DDJ-FLX10 drives four at a time (deck layer 1-4 / 5-8)
 constexpr int kNumHotCues = 8;
 constexpr int kNumSavedLoops = 8;
 constexpr int kNumStems = 4;          // Vocals, Melody, Bass, Drums (Serato order)

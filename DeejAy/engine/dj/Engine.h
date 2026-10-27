@@ -13,6 +13,7 @@
 #include "Deck.h"
 #include "FxUnit.h"
 #include "Mixer.h"
+#include "Performer.h"
 #include "Recorder.h"
 #include "Sampler.h"
 #include "SpscFifo.h"
@@ -29,7 +30,7 @@ enum class Cmd : std::uint16_t
     DeckLoad, DeckReplaceAudio, DeckUnload, DeckSetGrid, DeckSetCuePoint, DeckSetHotCue, DeckSetLoopSlot, DeckSetKey,
     InstantDouble, PartInstantDouble,
     // transport
-    PlayPause, Play, Pause, Stutter, CueDown, CueUp, JumpToStart, SearchDown, SearchUp, SetPosition,
+    PlayPause, Play, Pause, Stutter, CueDown, CueUp, JumpToStart, RestartFromStart, SearchDown, SearchUp, SetPosition,
     HotCueDown, HotCueUp,
     // loops
     LoopIn, LoopOut, Reloop, LoopExit, FourBeatExit, LoopActiveToggle, AutoLoop, LoopHalve, LoopDouble, LoopShift,
@@ -134,6 +135,7 @@ public:
     std::atomic<bool> fxPart[kNumStems] { true, true, true, true };   // FX PART SELECT
     std::atomic<int> samplerBank { 0 };                                // shared by UI and pads
     Recorder recorder;
+    Performer performer;                                                // master-bus performance FX
 
 private:
     void applyCommand (const Command& c) noexcept;
@@ -143,6 +145,7 @@ private:
     void syncOff (int d) noexcept;
     void keySync (int d) noexcept;
     double unitBpm (int unit) const noexcept;
+    int clockDeck() const noexcept;
     void processBlock (float* const* outputs, int numOutputs, int n) noexcept;
     void releaseAudio (std::uint64_t id);
     void retireEffect (Effect* fx);

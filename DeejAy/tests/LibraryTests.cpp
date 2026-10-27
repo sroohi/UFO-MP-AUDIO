@@ -1,6 +1,9 @@
 // Library, tag and Serato-prep import tests (files are synthesised byte by byte).
 #include "TestHarness.h"
 #include "dj/library/Library.h"
+#include "dj/library/Samples.h"
+#include "dj/library/StreamLinks.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -247,4 +250,104 @@ MP_TEST (serato_crate_file)
     REQUIRE (paths.size() == 2);
     CHECK (paths[0] == "Users/dj/Music/one.mp3" && paths[1] == "Users/dj/Music/two.flac");
     std::remove ("/tmp/deejay_test.crate");
+}
+
+// ============================================================================ sample names (Splice)
+
+MP_TEST (sample_names_give_bpm_key_and_loop)
+{
+    using dj::library::parseSampleName;
+    auto a = parseSampleName ("packs/KSHMR Sounds/Loops/KSHMR_Lead_Loop_128_Am.wav");
+    CHECK_NEAR (a.bpm, 128.0, 1e-9);
+    CHECK (a.key == 21);                               // A minor
+    CHECK (a.loop);
+    CHECK (a.pack == "KSHMR Sounds");
+    CHECK (a.name == "KSHMR Lead Loop 128 Am");
+    auto b = parseSampleName ("Cymatics - Vocal Loop 1 - 95 BPM C Min.wav");
+    CHECK_NEAR (b.bpm, 95.0, 1e-9);
+    CHECK (b.key == 12);                               // C minor
+    auto c = parseSampleName ("PL_KRM_100_Fmaj_keys.wav");
+    CHECK_NEAR (c.bpm, 100.0, 1e-9);
+    CHECK (c.key == 5);                                // F major
+    CHECK (c.loop);                                    // has a tempo, no one-shot words
+    auto d = parseSampleName ("packs/Drums/One Shots/ESM_House_Kick_One_Shot_808.wav");
+    CHECK (d.bpm == 0.0);                              // 808 is not a tempo
+    CHECK (! d.loop);
+    auto e = parseSampleName ("trap_hats_140bpm_F#m.wav");
+    CHECK_NEAR (e.bpm, 140.0, 1e-9);
+    CHECK (e.key == 18);                               // F# minor
+    auto f = parseSampleName ("OS_DMY_120_G_guitar_loop.wav");
+    CHECK_NEAR (f.bpm, 120.0, 1e-9);
+    CHECK (f.key == 7);                                // bare "G" next to the tempo
+    auto g = parseSampleName ("i_am_a_vocal_chop_A_take2.wav");
+    CHECK (g.key == -1);                               // "am" is a word, a lone "A" without context is not a key
+    auto h = parseSampleName ("FM_Bass_Loop_126.wav");
+    CHECK (h.key == -1);                               // FM synthesis, not F major
+    CHECK_NEAR (h.bpm, 126.0, 1e-9);
+}
+
+MP_TEST (loop_bpm_from_length)
+{
+    using dj::library::guessLoopBpm;
+    CHECK_NEAR (guessLoopBpm (8.0), 120.0, 1e-9);      // 16 beats
+    CHECK_NEAR (guessLoopBpm (7.5), 128.0, 1e-9);      // 16 beats
+    CHECK_NEAR (guessLoopBpm (16.0 * 60.0 / 140.0), 140.0, 1e-9);   // not 70 (8 beats)
+    CHECK_NEAR (guessLoopBpm (0.05), 0.0, 1e-9);
+}
+
+MP_TEST (stream_links_are_classified)
+{
+    using namespace dj::library;
+    auto yt = classifyLink ("  https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RD123&t=42 ");
+    CHECK (yt.service == LinkService::YouTube && yt.isTrack);
+    CHECK (yt.url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ");     // playlist context dropped
+    CHECK (classifyLink ("https://youtu.be/dQw4w9WgXcQ?si=abc").id == "dQw4w9WgXcQ");
+    CHECK (classifyLink ("youtube.com/shorts/dQw4w9WgXcQ").isTrack);
+    CHECK (classifyLink ("https://music.youtube.com/watch?v=dQw4w9WgXcQ").service == LinkService::YouTube);
+    CHECK (! classifyLink ("https://www.youtube.com/@somechannel").isTrack);
+    auto sc = classifyLink ("https://soundcloud.com/artist-name/track-name");
+    CHECK (sc.service == LinkService::SoundCloud && sc.isTrack);
+    CHECK (! classifyLink ("https://soundcloud.com/artist-name/sets/an-album").isTrack);
+    CHECK (classifyLink ("https://on.soundcloud.com/AbCd1").isTrack);
+    auto sp = classifyLink ("https://open.spotify.com/intl-de/track/4cOdK2wGLETKBW3PvgPWqT?si=x");
+    CHECK (sp.service == LinkService::Spotify && sp.isTrack && sp.id == "4cOdK2wGLETKBW3PvgPWqT");
+    CHECK (classifyLink ("spotify:track:4cOdK2wGLETKBW3PvgPWqT").url == "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT");
+    CHECK (! classifyLink ("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M").isTrack);
+    CHECK (classifyLink ("https://example.com/song.mp3").service == LinkService::Unknown);
+}
+
+MP_TEST (yt_dlp_arguments_and_progress)
+{
+    using namespace dj::library;
+    const auto a = ytDlpArguments ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "/tmp/%(title)s.%(ext)s", true);
+    CHECK (std::find (a.begin(), a.end(), "--no-playlist") != a.end());
+    CHECK (std::find (a.begin(), a.end(), "m4a") != a.end());
+    CHECK (a.back() == "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    const auto b = ytDlpArguments ("u", "o", false);
+    CHECK (std::find (b.begin(), b.end(), "-x") == b.end());   // no conversion without ffmpeg
+    CHECK_NEAR (*parseYtDlpProgress ("[download]  42.3% of    3.45MiB at  1.23MiB/s ETA 00:02"), 42.3, 1e-9);
+    CHECK_NEAR (*parseYtDlpProgress ("[download] 100% of 3.45MiB in 00:01"), 100.0, 1e-9);
+    CHECK (! parseYtDlpProgress ("[youtube] dQw4w9WgXcQ: Downloading webpage").has_value());
+    std::string artist, title;
+    splitDownloadName ("/x/Rick_Astley - Never_Gonna_Give_You_Up [dQw4w9WgXcQ].m4a", artist, title);
+    CHECK (artist == "Rick Astley");
+    CHECK (title == "Never Gonna Give You Up");
+}
+
+MP_TEST (spotify_link_finds_the_track_in_the_library)
+{
+    using namespace dj::library;
+    std::string title, author;
+    CHECK (parseOEmbed (R"({"html":"<iframe></iframe>","provider_name":"Spotify","title":"Strings of Life - Original Mix","type":"rich"})", title, author));
+    CHECK (title == "Strings of Life - Original Mix");
+    CHECK (author.empty());
+    CHECK (spotifyOEmbedUrl ("https://open.spotify.com/track/abc").find ("url=https%3A%2F%2Fopen.spotify.com%2Ftrack%2Fabc") != std::string::npos);
+    Library lib;
+    TagInfo t1; t1.title = "Strings Of Life"; t1.artist = "Derrick May";
+    TagInfo t2; t2.title = "Strings"; t2.artist = "Someone Else";
+    const auto id1 = lib.addOrUpdate ("/m/a.mp3", t1, 0).id;
+    lib.addOrUpdate ("/m/b.mp3", t2, 0);
+    CHECK (findTrackByTitle (lib, title, "") == id1);
+    CHECK (findTrackByTitle (lib, "Strings of Life (feat. Nobody)", "Derrick May") == id1);
+    CHECK (findTrackByTitle (lib, "Completely Different", "") == 0);
 }

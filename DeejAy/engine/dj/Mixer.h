@@ -52,7 +52,7 @@ struct MixerControls
 
 struct MixerView
 {
-    std::atomic<float> channelPeak[kNumDecks] { 0, 0, 0, 0 };
+    std::atomic<float> channelPeak[kNumDecks] {};
     std::atomic<float> masterPeak[2] { 0, 0 };
     std::atomic<float> limiterReductionDb { 0.0f };
     std::atomic<bool> clip { false };

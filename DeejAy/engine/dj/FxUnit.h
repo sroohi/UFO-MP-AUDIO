@@ -2,7 +2,7 @@
 // Single FX = one effect with three parameters) and one DDJ-FLX10-style BEAT FX unit (one effect,
 // BEAT </>, LEVEL/DEPTH, CH SELECT incl. MASTER and SAMPLER).
 //
-// A unit can be assigned to several targets at once (channels 1-4, master, sampler). Each target has
+// A unit can be assigned to several targets at once (channels 1-8, master, sampler). Each target has
 // its own effect instances, so echoes on two decks do not share a delay line. Instances are created
 // on the message thread (Engine::setFxType) and installed through the command queue.
 #pragma once
@@ -13,8 +13,9 @@
 namespace dj
 {
 
-enum class FxTarget : int { Ch1 = 0, Ch2, Ch3, Ch4, Master, Sampler };
-constexpr int kFxTargets = 6;
+// Targets 0 .. kNumDecks-1 are the channels; then master and sampler.
+enum class FxTarget : int { Ch1 = 0, Master = kNumDecks, Sampler = kNumDecks + 1 };
+constexpr int kFxTargets = kNumDecks + 2;
 enum class FxPlacement : int { PreEq = 0, PreFader = 1, PostFader = 2 };
 
 constexpr int kBeatFxUnit = 2;      // engine index of the FLX10 BEAT FX unit
@@ -27,7 +28,7 @@ struct FxUnitControls
     std::atomic<float> slotLevel[kFxSlotsPerUnit] { 0.8f, 0.8f, 0.8f };
     std::atomic<float> params[3] { 0.5f, 0.5f, 0.5f };      // Single FX parameters
     std::atomic<float> beats { 1.0f };                      // beat multiplier (negative: falling)
-    std::atomic<bool> assign[kFxTargets] { false, false, false, false, false, false };
+    std::atomic<bool> assign[kFxTargets] {};
     std::atomic<int> placement { (int) FxPlacement::PostFader };
     std::atomic<bool> tapMode { false };                    // FLX10 SHIFT+BEAT >: TAP; SHIFT+BEAT <: AUTO
     std::atomic<double> tapBpm { 120.0 };

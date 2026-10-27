@@ -196,6 +196,8 @@ public:
     void cueDown() noexcept;
     void cueUp() noexcept;
     void jumpToStart() noexcept;            // SHIFT+CUE
+    // Double-click CUE: play from the top of the track. A cue point moved by the first click is put back.
+    void restartFromStart() noexcept;
     void searchDown (int direction) noexcept; // 4 BEAT JUMP long press / Beat Jump pads 6-7
     void searchUp() noexcept;
 
@@ -248,6 +250,9 @@ public:
     bool keylock() const noexcept { return keylock_; }
     void setKeyShift (int semitones) noexcept { keyShift_ = std::clamp (semitones, -12, 12); }
     int keyShift() const noexcept { return keyShift_; }
+    // How far the deck sounds from the track's key: key shift, plus the tempo fader's pitch when key lock
+    // is off (+6 % on a turntable is about a semitone up).
+    double soundingSemitones() const noexcept { return keyShift_ + (keylock_ ? 0.0 : 12.0 * std::log2 (std::max (0.01, 1.0 + tempo_))); }
     void pitchPlay (int semitones) noexcept;        // jump to the Pitch Play cue at a key
     void setPitchPlayCue (int i) noexcept { pitchPlayCue_ = i; }
 
@@ -331,6 +336,7 @@ private:
 
     // cue logic (CDJ / Serato)
     double cuePoint_ = 0.0;
+    double cueBeforeLastSet_ = -1.0; // cue point the last CUE press replaced (-1: it did not set one)
     bool cuePreview_ = false;       // CUE held: playing as a preview
     bool playLatchedDuringCue_ = false;
     std::array<double, kNumHotCues> hotCues_ {};

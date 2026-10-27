@@ -85,6 +85,7 @@ void Engine::prepare (double sampleRate, int maxBlock)
     for (auto& e : eqA_) e.prepare (sampleRate);
     for (auto& e : eqB_) e.prepare (sampleRate);
     limiter_.prepare (sampleRate);
+    performer.prepare (sampleRate, maxBlock_);
     // gain ramps start from the current control values (no fade-in on the first block)
     for (int ch = 0; ch < kNumDecks; ++ch)
     {
@@ -305,12 +306,29 @@ void Engine::keySync (int d) noexcept
             if (k != d && decks_[(std::size_t) k]->playing() && decks_[(std::size_t) k]->musicalKey() >= 0) { target = k; break; }
     if (target < 0) return;
     auto& t = *decks_[(std::size_t) target];
-    const int targetKey = transposeKey (t.musicalKey(), t.keyShift());
+    const int targetKey = transposeKey (t.musicalKey(), (int) std::lround (t.soundingSemitones()));
     int diff = relativeMajorPc (targetKey) - relativeMajorPc (deck.musicalKey());
     diff = ((diff % 12) + 12) % 12;
     if (diff > 6) diff -= 12;
     deck.setKeyShift (diff);
     deck.setKeylock (true);
+}
+
+// The deck that keeps time for tempo-synced master effects: the sync leader while it plays, otherwise
+// the loudest playing deck with a beatgrid. -1 when nothing with a grid plays.
+int Engine::clockDeck() const noexcept
+{
+    if (leader_ >= 0 && decks_[(std::size_t) leader_]->playing() && decks_[(std::size_t) leader_]->hasGrid()) return leader_;
+    int best = -1;
+    float bestLevel = -1.0f;
+    for (int d = 0; d < kNumDecks; ++d)
+    {
+        const auto& deck = *decks_[(std::size_t) d];
+        if (! deck.playing() || ! deck.hasGrid()) continue;
+        const float level = mixer.ch[(std::size_t) d].fader.load (std::memory_order_relaxed);
+        if (level > bestLevel) { bestLevel = level; best = d; }
+    }
+    return best;
 }
 
 double Engine::unitBpm (int unit) const noexcept
@@ -381,6 +399,7 @@ void Engine::applyDeckCommand (Deck& d, const Command& c) noexcept
         case Cmd::CueDown: d.cueDown(); break;
         case Cmd::CueUp: d.cueUp(); break;
         case Cmd::JumpToStart: d.jumpToStart(); break;
+        case Cmd::RestartFromStart: d.restartFromStart(); break;
         case Cmd::SearchDown: d.searchDown (c.index); break;
         case Cmd::SearchUp: d.searchUp(); break;
         case Cmd::SetPosition: d.setPosition (c.value); break;
@@ -518,6 +537,15 @@ void Engine::processBlock (float* const* outputs, int numOutputs, int n) noexcep
         leaderPlaying = l.playing();
         if (l.hasGrid()) leaderBeat = fmodPos (l.grid().beatAt (l.position(), l.audio()->sampleRate), 4.0);
     }
+    // master clock for the sampler and the Performer: the clock deck's tempo and beat at this block's start
+    const int cd = clockDeck();
+    double clockBpm = unitBpm (0), clockBeat = -1.0;
+    if (cd >= 0)
+    {
+        const auto& d = *decks_[(std::size_t) cd];
+        clockBpm = d.effectiveBpm();
+        clockBeat = fmodPos (d.grid().beatAt (d.position(), d.audio()->sampleRate), 4.0);
+    }
     view.leader.store (leader_, std::memory_order_relaxed);
     view.masterBpm.store (leaderBpm, std::memory_order_relaxed);
     view.quantize.store (quantize_, std::memory_order_relaxed);
@@ -560,7 +588,7 @@ void Engine::processBlock (float* const* outputs, int numOutputs, int n) noexcep
     // ---- sampler (slots routed to a channel are mixed into that deck's FX-part bus)
     float* chanInject[kNumDecks * 2];
     for (int d = 0; d < kNumDecks; ++d) { chanInject[d * 2] = deckBus_[d][0].data(); chanInject[d * 2 + 1] = deckBus_[d][1].data(); }
-    sampler_.process (smpL_.data(), smpR_.data(), chanInject, n, leaderBpm > 1.0 ? leaderBpm : unitBpm (0));
+    sampler_.process (smpL_.data(), smpR_.data(), chanInject, n, clockBpm, clockBeat);
 
     std::fill (masterL_.begin(), masterL_.begin() + n, 0.0f);
     std::fill (masterR_.begin(), masterR_.begin() + n, 0.0f);
@@ -668,6 +696,7 @@ void Engine::processBlock (float* const* outputs, int numOutputs, int n) noexcep
 
     // ---- master
     runUnits ((int) FxTarget::Master, FxPlacement::PostFader, true, masterL_.data(), masterR_.data());
+    performer.process (masterL_.data(), masterR_.data(), n, clockBpm, clockBeat);   // the whole mix
     const float masterLevel = mixer.masterLevel.load (std::memory_order_relaxed);
     applyRamp (masterL_.data(), masterR_.data(), n, lastMaster_, masterLevel);
     lastMaster_ = masterLevel;

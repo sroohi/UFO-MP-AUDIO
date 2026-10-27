@@ -314,6 +314,7 @@ void Deck::stutter() noexcept
 void Deck::cueDown() noexcept
 {
     if (audio_ == nullptr) return;
+    cueBeforeLastSet_ = -1.0;
     if (playing_)
     {
         jumpTo (cuePoint_);
@@ -330,6 +331,7 @@ void Deck::cueDown() noexcept
         motor_ = 1.0;
         return;
     }
+    cueBeforeLastSet_ = cuePoint_;
     cuePoint_ = snap (pos_);
     jumpTo (cuePoint_);
     emit (DeckEvent::Kind::CueSet, 0, cuePoint_);
@@ -348,6 +350,21 @@ void Deck::cueUp() noexcept
 void Deck::jumpToStart() noexcept
 {
     jumpTo (0.0);
+}
+
+void Deck::restartFromStart() noexcept
+{
+    if (audio_ == nullptr) return;
+    if (cueBeforeLastSet_ >= 0.0)
+    {
+        cuePoint_ = cueBeforeLastSet_;
+        emit (DeckEvent::Kind::CueSet, 0, cuePoint_);
+    }
+    cueBeforeLastSet_ = -1.0;
+    cuePreview_ = false;
+    playLatchedDuringCue_ = false;
+    jumpTo (0.0);
+    play();
 }
 
 void Deck::searchDown (int direction) noexcept { search_ = direction < 0 ? -1 : 1; }

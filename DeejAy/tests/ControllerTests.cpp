@@ -207,3 +207,30 @@ MP_TEST (flx10_jog_display_messages)
     // key change amount 0 = 0x0D on the deck channel
     CHECK (r.sentContains (out, 0xB0, 0x4A, 0x0D));
 }
+
+MP_TEST (flx10_deck_layer_drives_decks_5_to_8)
+{
+    Rig r;
+    auto t = std::make_shared<TrackAudio>();
+    t->setMix (std::vector<float> (48000 * 20 * 2, 0.1f), 48000.0);
+    r.engine.loadDeck (4, t);
+    r.run();
+    r.flx.setDeckLayer (1);
+    std::vector<Message> out;
+    r.flx.collectOutput (out);
+    out.clear();
+    r.press (0, 0x0B);                                               // hardware deck 1 PLAY -> deck 5
+    r.run (4);
+    CHECK (r.engine.deck (4).playing());
+    CHECK (! r.engine.deck (0).playing());
+    r.flx.collectOutput (out);
+    CHECK (r.sentContains (out, 0x90, 0x0B, 0x7F));                 // deck 5's state on channel 1
+    r.cc (0, 0x13, 0x00);                                            // channel 1 fader -> mixer channel 5
+    CHECK_NEAR (r.engine.mixer.ch[4].fader.load(), 0.0f, 1e-6f);
+    r.flx.setDeckLayer (0);
+    out.clear();
+    r.flx.collectOutput (out);
+    CHECK (r.sentContains (out, 0x90, 0x0B, 0x00));                 // back on layer 0: deck 1 is stopped
+    r.flx.setDeckLayer (7);                                          // out of range clamps to the last layer
+    CHECK (r.flx.deckLayer() == 1);
+}

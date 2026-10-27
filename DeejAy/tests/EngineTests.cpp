@@ -878,6 +878,99 @@ MP_TEST (sampler_trigger_hold_onoff_and_sync)
     CHECK_NEAR (s.view[0].position.load() * 48000.0, 512.0 * 1.05, 1.0);
 }
 
+namespace
+{
+    std::shared_ptr<TrackAudio> toneTrack (double seconds, double hz)
+    {
+        auto t = std::make_shared<TrackAudio>();
+        std::vector<float> mix ((std::size_t) (seconds * kSr) * 2);
+        for (std::size_t i = 0; i < mix.size() / 2; ++i)
+            mix[i * 2] = mix[i * 2 + 1] = 0.5f * (float) std::sin (2.0 * kPi * hz * (double) i / kSr);
+        t->setMix (std::move (mix), kSr);
+        return t;
+    }
+
+    int crossings (const std::vector<float>& v, std::size_t from, std::size_t to)
+    {
+        int z = 0;
+        for (std::size_t i = from + 1; i < to; ++i) if ((v[i - 1] < 0.0f) != (v[i] < 0.0f)) ++z;
+        return z;
+    }
+
+    struct SamplerRig
+    {
+        Sampler s;
+        std::vector<float> ch = std::vector<float> (512 * 2 * kNumDecks, 0.0f);
+        float* chans[2 * kNumDecks];
+        std::vector<float> outL, outR;
+        SamplerRig()
+        {
+            s.prepare (kSr);
+            for (int k = 0; k < 2 * kNumDecks; ++k) chans[k] = ch.data() + k * 512;
+        }
+        // renders `blocks` blocks under a master at `bpm`, beat clock starting at `beat` (negative: none)
+        void run (int blocks, double bpm, double& beat)
+        {
+            std::vector<float> l (512), r (512);
+            for (int b = 0; b < blocks; ++b)
+            {
+                s.process (l.data(), r.data(), chans, 512, bpm, beat);
+                outL.insert (outL.end(), l.begin(), l.end());
+                outR.insert (outR.end(), r.begin(), r.end());
+                if (beat >= 0.0) beat += 512.0 * bpm / 60.0 / kSr;
+            }
+        }
+    };
+}
+
+MP_TEST (sampler_sync_with_key_lock_keeps_pitch)
+{
+    for (bool keylock : { true, false })
+    {
+        SamplerRig rig;
+        auto t = toneTrack (4.0, 440.0);
+        rig.s.load (0, t.get(), 1, 120.0);
+        rig.s.controls[0].sync.store (true);
+        rig.s.controls[0].quantize.store (false);
+        rig.s.controls[0].keylock.store (keylock);
+        rig.s.padDown (0);
+        double beat = -1.0;
+        rig.run (100, 126.0, beat);                   // ~1.07 s
+        const int z = crossings (rig.outL, 4800, 48000);
+        const double hz = z / 2.0 / (43200.0 / kSr);
+        CHECK_NEAR (hz, keylock ? 440.0 : 462.0, 4.0);
+        // either way the timeline runs 5 % fast (the loop matches 126 BPM)
+        CHECK_NEAR (rig.s.view[0].position.load() * 4.0 * kSr, 51200.0 * 1.05, 4.0);
+    }
+}
+
+MP_TEST (sampler_synced_launch_waits_for_the_beat_and_starts_at_full_level)
+{
+    SamplerRig rig;
+    auto t = toneTrack (2.0, 200.0);
+    rig.s.load (0, t.get(), 1, 126.0);
+    rig.s.controls[0].sync.store (true);             // quantize and key lock on by default
+    double beat = 2.3;                                // pressed 0.3 beats after beat 2
+    rig.s.padDown (0);
+    rig.run (40, 126.0, beat);
+    const double spb = 60.0 * kSr / 126.0;
+    const auto onset = (std::size_t) std::llround (0.7 * spb);   // beat 3
+    double before = 0.0;
+    for (std::size_t i = 0; i < onset - 2; ++i) before = std::max (before, (double) std::abs (rig.outL[i]));
+    CHECK (before < 1e-6);                            // silent until the beat
+    double first = 0.0;
+    for (std::size_t i = onset; i < onset + 240; ++i) first = std::max (first, (double) std::abs (rig.outL[i]));
+    CHECK (first > 0.45);                             // full level within 5 ms: no stretcher fade-in
+    CHECK (rig.s.view[0].playing.load());
+}
+
+MP_TEST (sampler_loop_length_snaps_to_whole_beats)
+{
+    CHECK_NEAR (Sampler::loopFrames (8.05 * kSr, kSr, 120.0), 8.0 * kSr, 1e-6);   // 16.1 beats -> 16
+    CHECK_NEAR (Sampler::loopFrames (7.3 * kSr, kSr, 120.0), 7.3 * kSr, 1e-6);    // 14.6 beats: left alone
+    CHECK_NEAR (Sampler::loopFrames (1000.0, kSr, 0.0), 1000.0, 1e-9);            // no BPM: left alone
+}
+
 MP_TEST (wav_writer_header)
 {
     const std::string path = "/tmp/deejay_test.wav";
@@ -897,3 +990,57 @@ MP_TEST (wav_writer_header)
 }
 
 int main() { return mptest::runAll(); }
+
+MP_TEST (double_click_cue_restarts_from_the_top_and_keeps_the_cue)
+{
+    DeckRig r (rampTrack (10.0));
+    r.grid (120.0);
+    r.d.setPosition (96000.0);
+    r.d.cueDown();                                // paused off the cue: sets the cue here
+    r.d.cueUp();
+    r.run (1);
+    CHECK_NEAR (r.d.view.cuePoint.load(), 96000.0, 1e-6);
+    r.d.restartFromStart();                       // the second click of a double-click
+    r.d.cueUp();                                  // its release must not stop playback
+    r.run (4800);
+    CHECK (r.d.playing());
+    CHECK (r.d.position() > 0.0 && r.d.position() < 10000.0);
+    CHECK_NEAR (r.d.view.cuePoint.load(), 0.0, 1e-6);   // the first click's cue move is undone
+
+    // while playing: first click returns to the cue and pauses, second starts from the top
+    DeckRig q (rampTrack (10.0));
+    q.d.setPosition (200000.0);
+    q.d.cueDown();
+    q.d.cueUp();
+    q.d.play();
+    q.run (4800);
+    q.d.cueDown();
+    q.d.cueUp();
+    q.run (1);
+    CHECK (! q.d.playing());
+    q.d.restartFromStart();
+    q.run (4800);
+    CHECK (q.d.playing());
+    CHECK (q.d.position() < 10000.0);
+    CHECK_NEAR (q.d.view.cuePoint.load(), 200000.0, 1e-6);  // the cue set before is kept
+}
+
+MP_TEST (key_sync_hears_the_other_decks_tempo_pitch)
+{
+    EngineRig rig;
+    rig.e.loadDeck (0, rampTrack (30.0));
+    rig.e.loadDeck (1, rampTrack (30.0));
+    rig.e.deckCommand (Cmd::DeckSetKey, 0, 0, 21.0); // A minor
+    rig.e.deckCommand (Cmd::DeckSetKey, 1, 0, 12.0); // C minor
+    rig.e.deckCommand (Cmd::TempoRangeSet, 0, 1);     // +-16 %
+    rig.run (1);
+    rig.e.deck (0).inputs.tempoFader.store (0.5f + 0.06f / 0.16f * 0.5f);   // +6 %, key lock off
+    rig.e.deck (0).inputs.tempoFaderMoved.store (true);
+    rig.e.deckCommand (Cmd::Play, 0);
+    rig.run (512);
+    CHECK_NEAR (rig.e.deck (0).soundingSemitones(), 1.0, 0.02);   // A minor sounds as B-flat minor
+    rig.e.deckCommand (Cmd::KeySync, 1);
+    rig.run (512);
+    CHECK (rig.e.deck (1).keyShift() == -2);          // C minor -> B-flat minor
+    CHECK (rig.e.deck (1).keylock());
+}
